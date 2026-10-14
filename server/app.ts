@@ -33,7 +33,7 @@ export function createApp(repo: Repo) {
     if (!repo.getBook(id)) throw new HttpError(404, '作品不存在');
   };
 
-  api.get('/health', (c) => c.json({ ok: true }));
+  api.get('/health', (c) => c.json({ ok: true, app: 'inkwell' }));
 
   // ---------- books ----------
   api.get('/books', (c) => c.json(repo.listBooks()));

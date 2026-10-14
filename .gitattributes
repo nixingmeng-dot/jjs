@@ -1,0 +1,2 @@
+# 保留 CRLF 原样，cmd 解析 LF 结尾的批处理文件会出错
+*.bat -text

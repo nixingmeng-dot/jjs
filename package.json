@@ -6,6 +6,7 @@
   "description": "本地小说创作工作台：多模型接入、大纲分卷、人物设定、去AI味写作工具",
   "scripts": {
     "dev": "concurrently -k -n server,web -c blue,green \"tsx watch server/index.ts\" \"vite\"",
+    "launch": "node scripts/launch.mjs",
     "build": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && vite build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
