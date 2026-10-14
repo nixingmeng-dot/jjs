@@ -1,0 +1,118 @@
+@import 'tailwindcss';
+
+@custom-variant dark (&:where([data-theme='dark'], [data-theme='dark'] *));
+
+:root {
+  --bg: #f6f5f1;
+  --panel: #ffffff;
+  --paper: #ffffff;
+  --ink: #1f1d1a;
+  --muted: #7a756c;
+  --line: #e5e1d8;
+  --hover: #f0ede6;
+  --accent: #b4532a;
+  --accent-ink: #ffffff;
+  --accent-soft: #f6e6dc;
+  --danger: #c0392b;
+  --ok: #3d8b5a;
+  color-scheme: light;
+}
+
+[data-theme='sepia'] {
+  --bg: #ebe2cf;
+  --panel: #f5eedf;
+  --paper: #f8f1e1;
+  --ink: #3b2f22;
+  --muted: #8a7a63;
+  --line: #ddd0b6;
+  --hover: #ece2cc;
+  --accent: #9a4a1f;
+  --accent-soft: #ead6bf;
+}
+
+[data-theme='dark'] {
+  --bg: #17181b;
+  --panel: #1f2024;
+  --paper: #1c1d21;
+  --ink: #e4e1da;
+  --muted: #8f8b84;
+  --line: #2f3036;
+  --hover: #2a2b30;
+  --accent: #e0875a;
+  --accent-ink: #1a1a1a;
+  --accent-soft: #3a2a22;
+  --danger: #e06c5e;
+  --ok: #6dbf8b;
+  color-scheme: dark;
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-hover: var(--hover);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --font-sans: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif;
+  --font-serif: 'Songti SC', 'Noto Serif CJK SC', 'Source Han Serif SC', 'STSong', 'SimSun', serif;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--muted) 45%, transparent) transparent;
+}
+
+/* 正文编辑器与其背后的高亮层必须完全同样的排版，才能对齐 */
+.prose-editor {
+  font-family: var(--font-serif);
+  line-height: 1.95;
+  letter-spacing: 0.02em;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.flavor-mark {
+  border-radius: 2px;
+  box-shadow: inset 0 -2px 0 currentColor;
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+.stream-caret::after {
+  content: '▍';
+  margin-left: 1px;
+  color: var(--accent);
+  animation: caret-blink 1s steps(1) infinite;
+}
