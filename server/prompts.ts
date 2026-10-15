@@ -193,7 +193,6 @@ export const REWRITE_MODES: Record<string, string> = {
 export interface BuiltPrompt {
   messages: LlmMessage[];
   temperature?: number;
-  maxTokens?: number;
 }
 
 export function buildPrompt(repo: Repo, req: AiRequest, settings: AppSettings): BuiltPrompt {
@@ -203,7 +202,6 @@ export function buildPrompt(repo: Repo, req: AiRequest, settings: AppSettings): 
   const writerSystem = join(NOVELIST, antiAiRules(settings, book), styleInfo(book));
   const length = Math.max(100, Math.min(req.length ?? 1000, 8000));
   const creativeTemp = settings.temperature;
-  const proseTokens = Math.max(settings.maxTokens, Math.min(Math.ceil(length * 2.2), 16000));
   const focusOf = (...t: (string | undefined)[]) => t.filter(Boolean).join('\n');
 
   const sys = (content: string): LlmMessage => ({ role: 'system', content });
@@ -229,7 +227,7 @@ export function buildPrompt(repo: Repo, req: AiRequest, settings: AppSettings): 
 - 推进细纲里还没写到的内容，但不要在这一段里把整章的事情全部写完。
 - 不写章节标题，结尾不要总结或升华。`,
       );
-      return { messages: [sys(writerSystem), user(body)], temperature: creativeTemp, maxTokens: proseTokens };
+      return { messages: [sys(writerSystem), user(body)], temperature: creativeTemp };
     }
 
     case 'draft': {
@@ -250,7 +248,7 @@ export function buildPrompt(repo: Repo, req: AiRequest, settings: AppSettings): 
 - 结尾停在一个动作、一句台词或一个悬念上，不要总结。
 - 不写章节标题。`,
       );
-      return { messages: [sys(writerSystem), user(body)], temperature: creativeTemp, maxTokens: proseTokens };
+      return { messages: [sys(writerSystem), user(body)], temperature: creativeTemp };
     }
 
     case 'rewrite': {
@@ -269,12 +267,9 @@ export function buildPrompt(repo: Repo, req: AiRequest, settings: AppSettings): 
         `---\n任务：${REWRITE_MODES[mode]}\n${extra}
 只输出处理后的文字本身：不要解释，不要加引号、标题或"<<<"标记；保持原文的人称、时态和分段方式。`,
       );
-      const len = text.length;
-      const factor = mode === 'expand' ? 3 : 1.6;
       return {
         messages: [sys(writerSystem), user(body)],
         temperature: mode === 'polish' || mode === 'condense' ? Math.min(creativeTemp, 0.7) : creativeTemp,
-        maxTokens: Math.max(settings.maxTokens, Math.min(Math.ceil(len * factor * 1.5), 16000)),
       };
     }
 
@@ -298,7 +293,6 @@ ${extra}
       return {
         messages: [sys(join(NOVELIST, antiAiRules({ ...settings, antiAiLevel: 'strict' }, book), styleInfo(book))), user(body)],
         temperature: Math.min(creativeTemp, 0.9),
-        maxTokens: Math.max(settings.maxTokens, Math.min(Math.ceil(text.length * 2.2), 16000)),
       };
     }
 
@@ -324,7 +318,7 @@ ${extra}
 五、逻辑与设定一致性：对照前情和设定找出矛盾
 六、最值得优先修改的三处`,
       );
-      return { messages: [sys(EDITOR), user(body)], temperature: 0.5, maxTokens: Math.max(settings.maxTokens, 4096) };
+      return { messages: [sys(EDITOR), user(body)], temperature: 0.5 };
     }
 
     case 'summary': {
@@ -341,7 +335,6 @@ ${extra}
       return {
         messages: [sys('你是严谨的小说编辑助理，擅长准确、简练地概括剧情。'), user(body)],
         temperature: 0.3,
-        maxTokens: Math.max(settings.maxTokens, 1024),
       };
     }
 
@@ -369,7 +362,7 @@ ${extra}
 冲突与转折：……
 结尾钩子：……`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9), maxTokens: Math.max(settings.maxTokens, 2048) };
+      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9) };
     }
 
     case 'outline_book': {
@@ -387,7 +380,7 @@ ${extra}
 五、关键转折与伏笔安排
 要求：情节具体到事件，动机可信，避免套路和空话。纯文本输出，用"一、二、"和"1. 2."编号，不用 Markdown 符号。`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp, maxTokens: Math.max(settings.maxTokens, 4096) };
+      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp };
     }
 
     case 'outline_volumes': {
@@ -403,7 +396,7 @@ ${extra}
 只输出 JSON 数组，不要任何其他文字：
 [{"title":"卷名（不要带"第X卷"）","summary":"本卷剧情概要，约 200 字"}]`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9), maxTokens: Math.max(settings.maxTokens, 4096) };
+      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9) };
     }
 
     case 'outline_chapters': {
@@ -432,7 +425,6 @@ ${extra}
       return {
         messages: [sys(PLANNER), user(body)],
         temperature: Math.min(creativeTemp, 0.9),
-        maxTokens: Math.max(settings.maxTokens, Math.min(count * 400, 16000)),
       };
     }
 
@@ -462,7 +454,7 @@ ${extra}
 只输出 JSON 对象，不要任何其他文字：
 {"name":"","aliases":"别名/称号","role":"主角/配角/反派/路人","gender":"","age":"","appearance":"外貌，抓一两个记忆点","personality":"性格，包含矛盾面","background":"背景经历","speech":"说话方式与示例台词","motivation":"核心动机与恐惧","arc":"人物弧光","relations":"与其他人物的关系"}`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp, maxTokens: Math.max(settings.maxTokens, 2048) };
+      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp };
     }
 
     case 'world': {
@@ -477,7 +469,7 @@ ${extra}
         `---\n任务：${entry.content ? '扩写并完善这条设定' : '为这条设定撰写内容'}。${extra}
 要求：具体、可直接用于写作；写清规则、限制和代价（能力、魔法、科技体系尤其如此）；与其他设定保持一致；给出一两个可以直接用进情节的细节。纯文本输出，不用 Markdown 符号。`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp, maxTokens: Math.max(settings.maxTokens, 2048) };
+      return { messages: [sys(PLANNER), user(body)], temperature: creativeTemp };
     }
 
     case 'brainstorm': {
@@ -496,7 +488,7 @@ ${extra}
         `---\n${extra.replace(/^作者的额外要求：/, '作者的问题：')}
 给出具体、彼此差异明显、可以直接拿去用的点子，至少有一个出人意料的选项；每条简短说明为什么可行。纯文本，用 1. 2. 编号。`,
       );
-      return { messages: [sys(PARTNER), user(body)], temperature: Math.max(creativeTemp, 0.9), maxTokens: Math.max(settings.maxTokens, 2048) };
+      return { messages: [sys(PARTNER), user(body)], temperature: Math.max(creativeTemp, 0.9) };
     }
 
     case 'chat': {
@@ -517,7 +509,6 @@ ${extra}
       return {
         messages: [sys(`${PARTNER}\n\n以下是这部作品的资料，回答时以此为准：\n\n${context}`), ...turns.map((t) => ({ role: t.role, content: t.content }))],
         temperature: creativeTemp,
-        maxTokens: Math.max(settings.maxTokens, 2048),
       };
     }
 

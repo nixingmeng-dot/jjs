@@ -147,6 +147,21 @@ export interface SearchHit {
 /** openai = Chat Completions；responses = OpenAI Responses；anthropic = Messages；gemini = generateContent */
 export type ProviderKind = 'openai' | 'responses' | 'anthropic' | 'gemini';
 
+export interface ModelLimit {
+  /** 上下文窗口（输入 + 输出），tokens */
+  context?: number;
+  /** 单次最大输出，tokens */
+  output?: number;
+}
+
+/** manual 手动填写；provider 服务商接口返回或实际请求时从报错得知；library 内置模型库 */
+export type LimitSource = 'manual' | 'provider' | 'library';
+
+export interface ResolvedLimit extends ModelLimit {
+  contextSource?: LimitSource;
+  outputSource?: LimitSource;
+}
+
 export interface Provider {
   id: string;
   name: string;
@@ -159,6 +174,10 @@ export interface Provider {
   enabled: number;
   sort: number;
   createdAt: number;
+  /** 自动识别到的模型上限（按模型 ID） */
+  detectedLimits: Record<string, ModelLimit>;
+  /** 手动填写的模型上限，优先于自动识别 */
+  limitOverrides: Record<string, ModelLimit>;
 }
 
 export type AntiAiLevel = 'off' | 'normal' | 'strict';
@@ -167,6 +186,7 @@ export interface AppSettings {
   defaultProviderId: string;
   defaultModel: string;
   temperature: number;
+  /** 单次最大输出 tokens；0 = 自动，按模型上限 */
   maxTokens: number;
   antiAiLevel: AntiAiLevel;
   extraBannedWords: string;

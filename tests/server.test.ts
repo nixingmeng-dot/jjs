@@ -4,6 +4,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../server/app';
 import { openDb, Repo } from '../server/db';
 import { splitThinkTags, sseEvents, type LlmChunk } from '../server/llm';
+import { estimateTokens, libraryLimit, limitFromModelInfo, normalizeModelId, parseLimitError, planMaxTokens } from '../server/modelLimits';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import type { AiStreamEvent, BookTree, Chapter } from '../shared/types';
 
 let app: ReturnType<typeof createApp>;
@@ -270,7 +275,7 @@ describe('OpenAI Responses API', () => {
       req.on('end', () => {
         if (req.url === '/v1/models') {
           res.setHeader('content-type', 'application/json');
-          return res.end(JSON.stringify({ data: [{ id: 'gpt-x' }] }));
+          return res.end(JSON.stringify({ data: [{ id: 'gpt-x' }, { id: 'meta-model', context_length: 64000, top_provider: { max_completion_tokens: 8000 } }] }));
         }
         if (req.url !== '/v1/responses' || req.headers.authorization !== 'Bearer sk-r') {
           res.statusCode = 404;
@@ -293,6 +298,12 @@ describe('OpenAI Responses API', () => {
           res.statusCode = 429;
           res.setHeader('retry-after', '1');
           return res.end(JSON.stringify({ error: { message: 'Model serving capacity is currently full; retry later', code: 'model_concurrency' } }));
+        }
+        if (body.model === 'capped-model' && body.max_output_tokens > 8192) {
+          res.statusCode = 400;
+          return res.end(
+            JSON.stringify({ error: { message: `Invalid 'max_output_tokens': integer above maximum value. Expected a value <= 8192, but got ${body.max_output_tokens} instead.` } }),
+          );
         }
         if (body.model === 'think-only') {
           return sse(res, [
@@ -372,6 +383,34 @@ describe('OpenAI Responses API', () => {
     expect(r.error).toBe('');
   });
 
+  it('uses the model output limit from the library by default', async () => {
+    const model = 'deepseek-ai/DeepSeek-V4.1-Flash';
+    const lib = libraryLimit(model)!;
+    expect(lib.output).toBeGreaterThan(0);
+    await run(model);
+    expect(bodies[0].max_output_tokens).toBe(lib.output);
+  });
+
+  it('learns the real output limit from the error and remembers it', async () => {
+    const r = await run('capped-model');
+    expect(r.text).toBe('雨停了。');
+    expect(bodies.map((b) => b.max_output_tokens)).toEqual([32768, 8192]);
+    expect(repo.getProvider(r.provider.id)!.detectedLimits['capped-model']).toEqual({ output: 8192 });
+    bodies.length = 0;
+    const { data: tree } = await call<BookTree>('GET', `/books/${repo.listBooks()[0].id}`);
+    await call('POST', '/ai/run', { task: 'continue', bookId: tree.book.id, chapterId: tree.chapters[0].id, providerId: r.provider.id, model: 'capped-model' });
+    expect(bodies.map((b) => b.max_output_tokens)).toEqual([8192]);
+  });
+
+  it('lets a manual limit override everything', async () => {
+    const r = await run('gpt-x');
+    await call('PATCH', `/providers/${r.provider.id}`, { limitOverrides: { 'gpt-x': { output: 5000 } } });
+    bodies.length = 0;
+    const { data: tree } = await call<BookTree>('GET', `/books/${repo.listBooks()[0].id}`);
+    await call('POST', '/ai/run', { task: 'continue', bookId: tree.book.id, chapterId: tree.chapters[0].id, providerId: r.provider.id, model: 'gpt-x' });
+    expect(bodies[0].max_output_tokens).toBe(5000);
+  });
+
   it('explains when a reasoning model runs out of output tokens before writing', async () => {
     const r = await run('think-only');
     expect(r.reasoning).toBe('The user is asking');
@@ -387,9 +426,66 @@ describe('OpenAI Responses API', () => {
   it('lists models and tests connection', async () => {
     const { provider } = await run('gpt-x');
     const { data } = await call('POST', `/providers/${provider.id}/models`);
-    expect(data.models).toEqual(['gpt-x']);
+    expect(data.models).toEqual(['gpt-x', 'meta-model']);
+    const { data: limits } = await call('POST', '/model-limits', { providerId: provider.id, models: ['meta-model'] });
+    expect(limits['meta-model']).toMatchObject({ context: 64000, output: 8000, contextSource: 'provider', outputSource: 'provider' });
     const { data: test } = await call('POST', `/providers/${provider.id}/test`, {});
     expect(test.ok).toBe(true);
+  });
+});
+
+describe('model limits', () => {
+  it('normalizes ids across providers', () => {
+    expect(normalizeModelId('deepseek-ai/DeepSeek-V4.1-Flash')).toBe('deepseek-v4.1-flash');
+    expect(normalizeModelId('openrouter/anthropic/claude-sonnet-4.5:thinking')).toBe('claude-sonnet-4.5');
+    expect(libraryLimit('zai-org/GLM-5.3-Flash')).toEqual(libraryLimit('glm-5.3-flash'));
+    expect(libraryLimit('glm-5.3-flash')?.output).toBeGreaterThan(0);
+    expect(libraryLimit('no-such-model-xyz')).toBeUndefined();
+  });
+
+  it('reads limits from model list metadata', () => {
+    expect(limitFromModelInfo({ id: 'x', context_length: 200000, top_provider: { max_completion_tokens: 64000 } })).toEqual({ context: 200000, output: 64000 });
+    expect(limitFromModelInfo({ name: 'models/gemini', inputTokenLimit: 1048576, outputTokenLimit: 65536 })).toEqual({ context: 1048576, output: 65536 });
+    expect(limitFromModelInfo({ id: 'x', context_window: 131072, max_completion_tokens: 32768 })).toEqual({ context: 131072, output: 32768 });
+    expect(limitFromModelInfo({ id: 'x', max_tokens: 4096 })).toBeUndefined();
+    expect(limitFromModelInfo({ id: 'x', object: 'model' })).toBeUndefined();
+  });
+
+  it('parses limit errors from common providers', () => {
+    expect(parseLimitError('max_tokens is too large: 32768. This model supports at most 16384 completion tokens, whereas you provided 32768.', 32768)).toEqual({ retryWith: 16384, learned: { output: 16384 } });
+    expect(parseLimitError('Invalid max_tokens value, the valid range of max_tokens is [1, 8192]', 32768)).toEqual({ retryWith: 8192, learned: { output: 8192 } });
+    expect(parseLimitError('max_tokens: 100000 > 64000, which is the maximum allowed number of output tokens for claude-sonnet-4-20250514', 100000)).toEqual({ retryWith: 64000, learned: { output: 64000 } });
+    expect(parseLimitError('input length and `max_tokens` exceed context limit: 188240 + 21333 > 200000, decrease input length or `max_tokens` and try again', 21333)).toEqual({ retryWith: 11696, learned: { context: 200000 } });
+    expect(parseLimitError("This model's maximum context length is 32768 tokens. However, you requested 33000 tokens (1000 in the messages, 32000 in the completion).", 32000)).toEqual({ retryWith: 31704, learned: { context: 32768 } });
+    expect(parseLimitError('This request requires more credits, or fewer max_tokens. You requested up to 64000 tokens, but can only afford 12000.', 64000)).toEqual({ retryWith: 12000, learned: undefined });
+    expect(parseLimitError("Unsupported parameter: 'temperature' is not supported with this model.", 32768)).toBeNull();
+    expect(parseLimitError('Invalid API key', 32768)).toBeNull();
+  });
+
+  it('plans the output budget from the model limit and context', () => {
+    expect(planMaxTokens({ limit: { output: 64000, context: 200000 }, promptTokens: 5000 })).toBe(64000);
+    expect(planMaxTokens({ limit: { output: 64000, context: 32768 }, promptTokens: 20000 })).toBe(32768 - 20000 - 512);
+    expect(planMaxTokens({ limit: {}, promptTokens: 1000 })).toBe(32768);
+    expect(planMaxTokens({ limit: { output: 8192 }, override: 20000, promptTokens: 100 })).toBe(8192);
+    expect(planMaxTokens({ limit: { output: 64000 }, override: 4000, promptTokens: 100 })).toBe(4000);
+    expect(estimateTokens([{ role: 'user', content: '雨停了。' }])).toBeGreaterThanOrEqual(12);
+  });
+
+  it('adds limit columns to an old database', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'inkwell-'));
+    const file = join(dir, 'old.db');
+    const old = new Database(file);
+    old.exec(`CREATE TABLE providers (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'openai', baseUrl TEXT NOT NULL DEFAULT '',
+      apiKey TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, sort REAL NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL);
+      INSERT INTO providers (id, name, createdAt) VALUES ('p1', '旧服务商', 1);`);
+    old.close();
+    const db = openDb(file);
+    const r = new Repo(db);
+    expect(r.getProvider('p1')).toMatchObject({ name: '旧服务商', detectedLimits: {}, limitOverrides: {} });
+    r.mergeDetectedLimits('p1', { m: { output: 4096 } });
+    expect(r.getProvider('p1')!.detectedLimits).toEqual({ m: { output: 4096 } });
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
   });
 });
 

@@ -12,10 +12,12 @@ import type {
   Chapter,
   ChapterMeta,
   CollectionName,
+  ModelLimit,
   Provider,
   SearchHit,
   Snapshot,
 } from '../shared/types';
+import { cleanLimits } from './modelLimits';
 
 export type DB = Database.Database;
 
@@ -116,7 +118,9 @@ CREATE TABLE IF NOT EXISTS providers (
   models TEXT NOT NULL DEFAULT '[]',
   enabled INTEGER NOT NULL DEFAULT 1,
   sort REAL NOT NULL DEFAULT 0,
-  createdAt INTEGER NOT NULL
+  createdAt INTEGER NOT NULL,
+  detectedLimits TEXT NOT NULL DEFAULT '{}',
+  limitOverrides TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS daily_stats (
@@ -158,7 +162,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   defaultProviderId: '',
   defaultModel: '',
   temperature: 0.85,
-  maxTokens: 4096,
+  maxTokens: 0,
   antiAiLevel: 'normal',
   extraBannedWords: '',
   editorFontSize: 18,
@@ -189,6 +193,11 @@ export function openDb(file: string): DB {
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
   db.exec(SCHEMA);
+  // 旧版本数据库补列
+  const cols = new Set((db.prepare('PRAGMA table_info(providers)').all() as { name: string }[]).map((c) => c.name));
+  for (const col of ['detectedLimits', 'limitOverrides']) {
+    if (!cols.has(col)) db.exec(`ALTER TABLE providers ADD COLUMN ${col} TEXT NOT NULL DEFAULT '{}'`);
+  }
   return db;
 }
 
@@ -475,6 +484,7 @@ export class Repo {
     if (typeof fields.baseUrl === 'string') fields.baseUrl = fields.baseUrl.trim().replace(/\/+$/, '');
     if (typeof fields.apiKey === 'string') fields.apiKey = fields.apiKey.trim();
     if (data.models !== undefined) fields.models = JSON.stringify(data.models.map((m) => m.trim()).filter(Boolean));
+    if (data.limitOverrides !== undefined) fields.limitOverrides = JSON.stringify(cleanLimits(data.limitOverrides));
     if (data.id && this.getProvider(data.id)) {
       if (Object.keys(fields).length) {
         const sets = Object.keys(fields).map((c) => `${c} = @${c}`);
@@ -489,6 +499,15 @@ export class Repo {
       .prepare(`INSERT INTO providers (id, ${cols.join(', ')}, createdAt) VALUES (@id, ${cols.map((c) => '@' + c).join(', ')}, @now)`)
       .run({ id, ...row, now: Date.now() });
     return this.getProvider(id)!;
+  }
+
+  /** 合并自动识别到的模型上限（服务商接口返回或从报错得知） */
+  mergeDetectedLimits(id: string, limits: Record<string, ModelLimit>) {
+    const p = this.getProvider(id);
+    if (!p || !Object.keys(limits).length) return;
+    const next = { ...p.detectedLimits };
+    for (const [model, l] of Object.entries(cleanLimits(limits))) next[model] = { ...next[model], ...l };
+    this.db.prepare('UPDATE providers SET detectedLimits = ? WHERE id = ?').run(JSON.stringify(next), id);
   }
 
   deleteProvider(id: string) {
@@ -525,14 +544,21 @@ export class Repo {
   }
 }
 
-function rowToProvider(row: Record<string, unknown>): Provider {
-  let models: string[] = [];
+function parseJson<T>(v: unknown, fallback: T): T {
   try {
-    models = JSON.parse(String(row.models ?? '[]'));
+    return JSON.parse(String(v ?? '')) ?? fallback;
   } catch {
-    models = [];
+    return fallback;
   }
-  return { ...(row as unknown as Provider), models };
+}
+
+function rowToProvider(row: Record<string, unknown>): Provider {
+  return {
+    ...(row as unknown as Provider),
+    models: parseJson<string[]>(row.models, []),
+    detectedLimits: cleanLimits(parseJson(row.detectedLimits, {})),
+    limitOverrides: cleanLimits(parseJson(row.limitOverrides, {})),
+  };
 }
 
 export class HttpError extends Error {

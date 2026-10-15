@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit && vite build",
     "start": "cross-env NODE_ENV=production tsx server/index.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "update-model-limits": "tsx scripts/update-model-limits.ts"
   },
   "dependencies": {
     "@fontsource-variable/noto-serif-sc": "^5.3.1",

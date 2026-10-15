@@ -1,4 +1,5 @@
-import type { Provider } from '../shared/types';
+import type { ModelLimit, Provider } from '../shared/types';
+import { limitFromModelInfo, parseLimitError } from './modelLimits';
 
 export interface LlmMessage {
   role: 'system' | 'user' | 'assistant';
@@ -12,6 +13,8 @@ export interface LlmOptions {
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
+  /** 从服务商报错里得知了模型上限 */
+  onLearn?: (limit: ModelLimit) => void;
 }
 
 export interface LlmChunk {
@@ -144,20 +147,32 @@ async function postJson(url: string, headers: Record<string, string>, body: unkn
   }
 }
 
-/** 部分模型不接受某些参数（如 temperature、max_tokens、reasoning），遇到 400 时去掉报错里提到的参数重试 */
+/**
+ * 遇到 400 时自动修正参数再试：
+ * 输出额度超过模型上限 → 改用报错里给出的上限（并记下来）；模型不支持某个参数 → 去掉它。
+ */
 async function postWithParamFallback(
   url: string,
   headers: Record<string, string>,
   body: Record<string, unknown>,
   optional: string[],
   signal?: AbortSignal,
+  tokens?: { key: string; onLearn?: (l: ModelLimit) => void },
 ) {
   let current = body;
   let remaining = optional.filter((k) => k in body);
-  for (;;) {
+  for (let attempt = 0; ; attempt++) {
     const res = await postJson(url, headers, current, signal);
-    if (res.status !== 400 || !remaining.length) return res;
+    if ((res.status !== 400 && res.status !== 402 && res.status !== 413 && res.status !== 422) || attempt >= 5) return res;
     const text = await res.text();
+    const requested = tokens ? Number(current[tokens.key]) : NaN;
+    const fix = requested > 0 ? parseLimitError(text, requested) : null;
+    if (tokens && fix && fix.retryWith >= 16 && fix.retryWith < requested) {
+      if (fix.learned) tokens.onLearn?.(fix.learned);
+      current = { ...current, [tokens.key]: fix.retryWith };
+      continue;
+    }
+    if (res.status !== 400 || !remaining.length) return new Response(text, { status: res.status });
     let drop = remaining.filter((k) => text.includes(k));
     if (!drop.length && /unsupported|not support/i.test(text)) drop = remaining;
     if (!drop.length) return new Response(text, { status: 400 });
@@ -205,6 +220,7 @@ async function* openaiStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
     body,
     ['temperature', tokenKey],
     o.signal,
+    { key: tokenKey, onLearn: o.onLearn },
   );
   if (!res.ok || !res.body) throw await describeError(res);
   for await (const ev of sseEvents(res.body)) {
@@ -242,6 +258,7 @@ async function* anthropicStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
     body,
     ['temperature'],
     o.signal,
+    { key: 'max_tokens', onLearn: o.onLearn },
   );
   if (!res.ok || !res.body) throw await describeError(res);
   for await (const ev of sseEvents(res.body)) {
@@ -327,6 +344,7 @@ async function* responsesStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
     body,
     ['reasoning', 'temperature', 'max_output_tokens', 'store'],
     o.signal,
+    { key: 'max_output_tokens', onLearn: o.onLearn },
   );
   if (!res.ok || !res.body) throw await describeError(res);
   let gotText = false;
@@ -441,7 +459,8 @@ export function streamChat(o: LlmOptions): AsyncGenerator<LlmChunk> {
   }
 }
 
-export async function listModels(provider: Provider, signal?: AbortSignal): Promise<string[]> {
+/** 拉取模型列表，顺带读取服务商返回的上下文 / 输出上限 */
+export async function listModels(provider: Provider, signal?: AbortSignal): Promise<{ ids: string[]; limits: Record<string, ModelLimit> }> {
   let url: string;
   const headers: Record<string, string> = {};
   if (provider.kind === 'anthropic') {
@@ -463,13 +482,18 @@ export async function listModels(provider: Provider, signal?: AbortSignal): Prom
   }
   if (!res.ok) throw await describeError(res);
   const json: any = await res.json();
-  let ids: string[];
+  let items: { id: string; info: any }[];
   if (provider.kind === 'gemini') {
-    ids = (json.models ?? [])
+    items = (json.models ?? [])
       .filter((m: any) => !m.supportedGenerationMethods || m.supportedGenerationMethods.includes('generateContent'))
-      .map((m: any) => String(m.name).replace(/^models\//, ''));
+      .map((m: any) => ({ id: String(m.name).replace(/^models\//, ''), info: m }));
   } else {
-    ids = (json.data ?? json.models ?? []).map((m: any) => String(m.id ?? m.name));
+    items = (json.data ?? json.models ?? []).map((m: any) => ({ id: String(m?.id ?? m?.name ?? ''), info: m }));
   }
-  return Array.from(new Set(ids.filter(Boolean))).sort();
+  const limits: Record<string, ModelLimit> = {};
+  for (const { id, info } of items) {
+    const l = id && limitFromModelInfo(info);
+    if (l) limits[id] = l;
+  }
+  return { ids: Array.from(new Set(items.map((i) => i.id).filter(Boolean))).sort(), limits };
 }

@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router';
 import { PROMPT_BANNED_PHRASES } from '../../shared/antiAi';
 import { PROVIDER_KIND_LABEL, PROVIDER_PRESETS } from '../../shared/providers';
-import type { AntiAiLevel, AppSettings, Provider, ProviderKind } from '../../shared/types';
+import type { AntiAiLevel, AppSettings, LimitSource, ModelLimit, Provider, ProviderKind, ResolvedLimit } from '../../shared/types';
 import { api } from '../api';
 import { Badge, Button, confirmAsk, cx, Empty, Field, Input, Modal, Segmented, Select, Textarea } from '../components/ui';
 import { toast, toastError, useApp } from '../store';
@@ -36,14 +36,15 @@ export default function SettingsPage() {
                 className="w-full accent-[var(--accent)]"
               />
             </Field>
-            <Field label="单次最大输出 tokens" hint="长章节会自动调高">
+            <Field label="单次最大输出 tokens" hint="留空 = 自动，按每个模型的上限">
               <Input
                 type="number"
-                min={256}
-                max={64000}
-                step={256}
-                value={settings.maxTokens}
-                onChange={(e) => updateSettings({ maxTokens: Math.max(256, Number(e.target.value) || 4096) })}
+                min={0}
+                step={1024}
+                value={settings.maxTokens || ''}
+                placeholder="自动"
+                onChange={(e) => updateSettings({ maxTokens: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+                onBlur={() => settings.maxTokens > 0 && settings.maxTokens < 256 && updateSettings({ maxTokens: 256 })}
               />
             </Field>
           </div>
@@ -238,15 +239,26 @@ interface ProviderForm {
   apiKey: string;
   models: string[];
   enabled: number;
+  limitOverrides: Record<string, ModelLimit>;
 }
 
 function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Provider | null; presetKey: string; onClose: () => void; onSaved: () => Promise<void> }) {
   const preset = PROVIDER_PRESETS.find((p) => p.key === presetKey)!;
   const [form, setForm] = useState<ProviderForm>(() =>
     provider
-      ? { name: provider.name, kind: provider.kind, baseUrl: provider.baseUrl, apiKey: provider.apiKey, models: provider.models, enabled: provider.enabled }
-      : { name: preset.name, kind: preset.kind, baseUrl: preset.baseUrl, apiKey: '', models: preset.models, enabled: 1 },
+      ? {
+          name: provider.name,
+          kind: provider.kind,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          models: provider.models,
+          enabled: provider.enabled,
+          limitOverrides: provider.limitOverrides ?? {},
+        }
+      : { name: preset.name, kind: preset.kind, baseUrl: preset.baseUrl, apiKey: '', models: preset.models, enabled: 1, limitOverrides: {} },
   );
+  const [autoLimits, setAutoLimits] = useState<Record<string, ResolvedLimit>>({});
+  const [limitsTick, setLimitsTick] = useState(0);
   const [saved, setSaved] = useState<Provider | null>(provider);
   const [modelInput, setModelInput] = useState('');
   const [remoteModels, setRemoteModels] = useState<string[] | null>(null);
@@ -257,8 +269,25 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
 
   useEffect(() => setTestResult(null), [form.baseUrl, form.apiKey, form.kind]);
 
+  const modelsKey = form.models.join('\n');
+  useEffect(() => {
+    if (!form.models.length) return setAutoLimits({});
+    const t = setTimeout(() => {
+      api.post<Record<string, ResolvedLimit>>('/model-limits', { providerId: saved?.id, models: form.models }).then(setAutoLimits).catch(() => {});
+    }, 150);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [saved?.id, modelsKey, limitsTick]);
+
+  const setOverride = (model: string, key: keyof ModelLimit, value?: number) =>
+    setForm((f) => {
+      const next = { ...f.limitOverrides, [model]: { ...f.limitOverrides[model], [key]: value } };
+      if (!next[model].context && !next[model].output) delete next[model];
+      return { ...f, limitOverrides: next };
+    });
+
   const persist = async () => {
-    const body = { ...form };
+    const body = { ...form, limitOverrides: Object.fromEntries(Object.entries(form.limitOverrides).filter(([m]) => form.models.includes(m))) };
     const result = saved ? await api.patch<Provider>(`/providers/${saved.id}`, body) : await api.post<Provider>('/providers', body);
     setSaved(result);
     setForm((f) => ({ ...f, apiKey: result.apiKey }));
@@ -276,6 +305,7 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
       const p = await persist();
       const { models } = await api.post<{ models: string[] }>(`/providers/${p.id}/models`);
       setRemoteModels(models);
+      setLimitsTick((n) => n + 1);
       if (!models.length) toast('服务商没有返回模型列表，请手动填写模型名');
     } catch (err) {
       toastError(err);
@@ -300,6 +330,7 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
       setTestResult({ ok: false, text: (err as Error).message });
     } finally {
       setBusy('');
+      setLimitsTick((n) => n + 1);
     }
   };
 
@@ -425,6 +456,43 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
             />
           </div>
         </Field>
+        {form.models.length > 0 && (
+          <div>
+            {/* 不用 Field：它是 <label>，点表格任意处都会聚焦到第一个输入框 */}
+            <div className="mb-1 flex items-baseline gap-2 text-xs font-medium text-muted">
+              <span>模型上限</span>
+              <span className="font-normal text-muted/80">自动识别，生成时据此设置输出额度；需要时可以手动改</span>
+            </div>
+            <div className="rounded-md border border-line text-xs">
+              <div className="grid grid-cols-[minmax(0,1fr)_88px_88px_92px] gap-2 border-b border-line px-2.5 py-1.5 text-[11px] text-muted">
+                <span>模型</span>
+                <span className="text-right">上下文</span>
+                <span className="text-right">最大输出</span>
+                <span className="text-right">来源</span>
+              </div>
+              {form.models.map((m) => {
+                const auto = autoLimits[m] ?? {};
+                const own = form.limitOverrides[m] ?? {};
+                const sources = [own.context ? 'manual' : auto.contextSource, own.output ? 'manual' : auto.outputSource].filter(Boolean) as LimitSource[];
+                return (
+                  <div key={m} className="grid grid-cols-[minmax(0,1fr)_88px_88px_92px] items-center gap-2 border-b border-line px-2.5 py-1 last:border-0">
+                    <span className="truncate" title={m}>
+                      {m}
+                    </span>
+                    <LimitCell value={own.context} auto={auto.context} source={auto.contextSource} onChange={(v) => setOverride(m, 'context', v)} />
+                    <LimitCell value={own.output} auto={auto.output} source={auto.outputSource} onChange={(v) => setOverride(m, 'output', v)} />
+                    <span className="truncate text-right text-[11px] text-muted">
+                      {sources.length ? [...new Set(sources)].map((s) => LIMIT_SOURCE[s]).join(' · ') : '未识别'}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-muted">
+              来源：「服务商」是模型列表接口返回的，或实际请求时从报错里得知的；「模型库」是内置的 models.dev 数据。都没有时按 32K 输出，服务商报错会自动改用它给出的上限。输入框留空即用自动值，可以填 128k、1m 这样的写法。
+            </p>
+          </div>
+        )}
         <div>
           <Button size="sm" icon={<RefreshCw className="size-3.5" />} loading={busy === 'fetch'} onClick={fetchModels}>
             从服务商拉取模型列表
@@ -466,5 +534,46 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
         )}
       </div>
     </Modal>
+  );
+}
+
+const LIMIT_SOURCE: Record<LimitSource, string> = { manual: '手动', provider: '服务商', library: '模型库' };
+
+/** 能被 1000 整除按十进制显示（384000 → 384K），否则按 1024 显示（131072 → 128K） */
+function formatTokens(n?: number) {
+  if (!n) return '';
+  const unit = (dec: number, bin: number) => (n % dec === 0 || n % bin !== 0 ? dec : bin);
+  if (n >= 1_000_000) return `${+(n / unit(1e6, 1048576)).toFixed(2)}M`;
+  if (n >= 1000) return `${+(n / unit(1000, 1024)).toFixed(1)}K`;
+  return String(n);
+}
+
+function parseTokens(s: string): number | undefined {
+  const m = s.trim().replace(/,/g, '').match(/^(\d+(?:\.\d+)?)\s*([km]?)$/i);
+  if (!m) return undefined;
+  const n = Math.round(Number(m[1]) * (m[2].toLowerCase() === 'm' ? 1e6 : m[2].toLowerCase() === 'k' ? 1e3 : 1));
+  return n >= 256 ? n : undefined;
+}
+
+function LimitCell({ value, auto, source, onChange }: { value?: number; auto?: number; source?: LimitSource; onChange: (v?: number) => void }) {
+  const [text, setText] = useState(value ? String(value) : '');
+  useEffect(() => setText(value ? String(value) : ''), [value]);
+  return (
+    <input
+      value={text}
+      onChange={(e) => setText(e.target.value)}
+      onBlur={() => {
+        const v = parseTokens(text);
+        if (!v) setText('');
+        onChange(v);
+      }}
+      onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+      placeholder={auto ? formatTokens(auto) : '—'}
+      title={auto ? `自动识别：${auto.toLocaleString()} tokens（${LIMIT_SOURCE[source ?? 'library']}）` : '未识别'}
+      className={cx(
+        'h-7 w-full min-w-0 rounded border border-transparent bg-transparent px-1.5 text-right tabular-nums outline-none hover:border-line focus:border-line focus:bg-paper',
+        value ? 'font-semibold text-ink' : 'placeholder:text-ink/75',
+      )}
+    />
   );
 }

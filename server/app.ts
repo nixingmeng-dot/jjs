@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
-import type { AiRequest, AiStreamEvent, AppSettings, CollectionName, Provider } from '../shared/types';
+import type { AiRequest, AiStreamEvent, AppSettings, CollectionName, Provider, ResolvedLimit } from '../shared/types';
 import { COLLECTIONS, HttpError, type Repo } from './db';
 import { listModels, streamChat } from './llm';
+import { estimateTokens, planMaxTokens, resolveLimit } from './modelLimits';
 import { buildPrompt } from './prompts';
 import { exportBook, importBackup, importText } from './transfer';
 
@@ -160,7 +161,9 @@ export function createApp(repo: Repo) {
     const p = repo.getProvider(c.req.param('id'));
     if (!p) throw new HttpError(404, '服务商不存在');
     try {
-      return c.json({ models: await listModels(p, AbortSignal.timeout(20000)) });
+      const { ids, limits } = await listModels(p, AbortSignal.timeout(20000));
+      repo.mergeDetectedLimits(p.id, limits);
+      return c.json({ models: ids, limits });
     } catch (err) {
       throw new HttpError(400, (err as Error).message);
     }
@@ -181,8 +184,9 @@ export function createApp(repo: Repo) {
         provider: p,
         model: m,
         messages: [{ role: 'user', content: '请只回复两个字：你好' }],
-        // 推理模型会先消耗思考 token，额度太小会拿不到任何输出；拿到第一段就中断，不会真的用满
-        maxTokens: 512,
+        // 用和正式请求一样的额度，顺便验证服务商接受它；拿到第一段就中断，不会真的用满
+        maxTokens: planMaxTokens({ limit: resolveLimit(p, m), override: repo.getSettings().maxTokens, promptTokens: 32 }),
+        onLearn: (l) => repo.mergeDetectedLimits(p.id, { [m]: l }),
         signal: ac.signal,
       })) {
         sample += chunk.text;
@@ -197,6 +201,15 @@ export function createApp(repo: Repo) {
       clearTimeout(timer);
       ac.abort();
     }
+  });
+
+  /** 模型的自动识别上限（不含手动填写），供设置页显示 */
+  api.post('/model-limits', async (c) => {
+    const { providerId, models } = await body<{ providerId?: string; models?: string[] }>(c);
+    const p = (providerId && repo.getProvider(providerId)) || ({ detectedLimits: {}, limitOverrides: {} } as unknown as Provider);
+    const out: Record<string, ResolvedLimit> = {};
+    for (const m of (models ?? []).slice(0, 500)) out[m] = resolveLimit(p, m, { overrides: false });
+    return c.json(out);
   });
 
   // ---------- AI ----------
@@ -241,7 +254,12 @@ export function createApp(repo: Repo) {
             model,
             messages: built.messages,
             temperature: req.temperature ?? built.temperature,
-            maxTokens: req.maxTokens ?? built.maxTokens,
+            maxTokens: planMaxTokens({
+              limit: resolveLimit(provider, model),
+              override: req.maxTokens ?? settings.maxTokens,
+              promptTokens: estimateTokens(built.messages),
+            }),
+            onLearn: (l) => repo.mergeDetectedLimits(provider.id, { [model]: l }),
             signal: controller.signal,
           })) {
             if (controller.signal.aborted) break;
