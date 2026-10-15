@@ -288,11 +288,13 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
     setBusy('test');
     try {
       const p = await persist();
-      const r = await api.post<{ ok: boolean; model: string; latency?: number; sample?: string; error?: string }>(`/providers/${p.id}/test`, {
+      const r = await api.post<{ ok: boolean; model: string; latency?: number; sample?: string; kind?: string; error?: string }>(`/providers/${p.id}/test`, {
         model: form.models[0],
       });
       setTestResult(
-        r.ok ? { ok: true, text: `连接成功：${r.model}，首字延迟 ${r.latency} ms，回复「${r.sample}」` } : { ok: false, text: r.error ?? '失败' },
+        r.ok
+          ? { ok: true, text: `连接成功：${r.model}，首字延迟 ${r.latency} ms，${r.kind === 'reasoning' ? '收到思考过程' : '回复'}「${r.sample}」` }
+          : { ok: false, text: r.error ?? '失败' },
       );
     } catch (err) {
       setTestResult({ ok: false, text: (err as Error).message });
@@ -361,7 +363,10 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
             </Select>
           </Field>
         </div>
-        <Field label="接口地址（Base URL）" hint={form.kind === 'openai' ? '通常以 /v1 结尾，会自动拼接 /chat/completions' : undefined}>
+        <Field
+          label="接口地址（Base URL）"
+          hint={form.kind === 'openai' ? '通常以 /v1 结尾，会自动拼接 /chat/completions' : form.kind === 'responses' ? '通常以 /v1 结尾，会自动拼接 /responses' : undefined}
+        >
           <Input value={form.baseUrl} onChange={(e) => setForm({ ...form, baseUrl: e.target.value })} placeholder="https://api.example.com/v1" />
         </Field>
         <Field

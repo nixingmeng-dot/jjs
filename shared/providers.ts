@@ -30,6 +30,15 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     keyUrl: 'https://platform.openai.com/api-keys',
   },
   {
+    key: 'openai-responses',
+    name: 'OpenAI（Responses 接口）',
+    kind: 'responses',
+    baseUrl: 'https://api.openai.com/v1',
+    models: [],
+    keyUrl: 'https://platform.openai.com/api-keys',
+    hint: '使用 /v1/responses 接口，推理模型会显示思考摘要。',
+  },
+  {
     key: 'anthropic',
     name: 'Anthropic Claude',
     kind: 'anthropic',
@@ -111,10 +120,19 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     models: [],
     hint: '任何兼容 OpenAI /chat/completions 的中转或自部署服务都可以接入。',
   },
+  {
+    key: 'custom-responses',
+    name: '自定义（OpenAI Responses 接口）',
+    kind: 'responses',
+    baseUrl: '',
+    models: [],
+    hint: '只提供 /v1/responses 的中转或服务选这个。接口地址填到 /v1 为止，会自动拼接 /responses。',
+  },
 ];
 
 export const PROVIDER_KIND_LABEL: Record<ProviderKind, string> = {
-  openai: 'OpenAI 兼容',
-  anthropic: 'Anthropic',
+  openai: 'OpenAI 兼容（Chat）',
+  responses: 'OpenAI Responses',
+  anthropic: 'Anthropic（Messages）',
   gemini: 'Gemini',
 };

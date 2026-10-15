@@ -81,9 +81,14 @@ AI 每次调用都会自动组装上下文：作品信息、文风设定与样�
 
 ## 支持的模型接口
 
-- **OpenAI 兼容**：OpenAI、DeepSeek、通义千问、Kimi、智谱 GLM、豆包、硅基流动、OpenRouter、Ollama 本地模型，以及任何兼容 `/chat/completions` 的中转服务
-- **Anthropic** 原生接口（Claude）
-- **Google Gemini** 原生接口
+| 接口协议 | 请求地址 | 适用 |
+|---|---|---|
+| OpenAI 兼容（Chat） | `{Base URL}/chat/completions` | OpenAI、DeepSeek、通义千问、Kimi、智谱 GLM、豆包、硅基流动、OpenRouter、Ollama 本地模型，以及任何兼容的中转服务 |
+| OpenAI Responses | `{Base URL}/responses` | OpenAI 新接口，以及只提供 Responses 的中转服务；推理模型会显示思考摘要 |
+| Anthropic（Messages） | `{Base URL}/v1/messages` | Claude 及兼容 Claude 格式的中转 |
+| Gemini | `/v1beta/models/{模型}:streamGenerateContent` | Google Gemini |
+
+四种协议都是流式输出，都支持拉取模型列表和测试连接。添加服务商时可以自由选择协议并填写任意 Base URL，所以中转服务只要选对协议即可。某个模型不支持 `temperature`、`reasoning` 等参数时，会自动去掉该参数重试。
 
 可以同时添加多个服务商，在 AI 面板顶部随时切换模型。
 

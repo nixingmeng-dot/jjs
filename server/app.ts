@@ -181,7 +181,8 @@ export function createApp(repo: Repo) {
         provider: p,
         model: m,
         messages: [{ role: 'user', content: '请只回复两个字：你好' }],
-        maxTokens: 64,
+        // 推理模型会先消耗思考 token，额度太小会拿不到任何输出；拿到第一段就中断，不会真的用满
+        maxTokens: 512,
         signal: ac.signal,
       })) {
         sample += chunk.text;

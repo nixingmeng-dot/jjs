@@ -125,7 +125,7 @@ async function postJson(url: string, headers: Record<string, string>, body: unkn
   }
 }
 
-/** 部分新模型不接受自定义 temperature / max_tokens，遇到 400 时去掉这些参数重试一次 */
+/** 部分模型不接受某些参数（如 temperature、max_tokens、reasoning），遇到 400 时去掉报错里提到的参数重试 */
 async function postWithParamFallback(
   url: string,
   headers: Record<string, string>,
@@ -133,19 +133,19 @@ async function postWithParamFallback(
   optional: string[],
   signal?: AbortSignal,
 ) {
-  let res = await postJson(url, headers, body, signal);
-  if (res.status === 400) {
+  let current = body;
+  let remaining = optional.filter((k) => k in body);
+  for (;;) {
+    const res = await postJson(url, headers, current, signal);
+    if (res.status !== 400 || !remaining.length) return res;
     const text = await res.text();
-    const mentioned = optional.filter((k) => text.includes(k) || /unsupported|not support/i.test(text));
-    if (mentioned.length) {
-      const stripped = { ...body };
-      for (const k of optional) delete stripped[k];
-      res = await postJson(url, headers, stripped, signal);
-    } else {
-      return new Response(text, { status: 400 });
-    }
+    let drop = remaining.filter((k) => text.includes(k));
+    if (!drop.length && /unsupported|not support/i.test(text)) drop = remaining;
+    if (!drop.length) return new Response(text, { status: 400 });
+    current = { ...current };
+    for (const k of drop) delete current[k];
+    remaining = remaining.filter((k) => !drop.includes(k));
   }
-  return res;
 }
 
 function systemText(messages: LlmMessage[]) {
@@ -283,6 +283,81 @@ async function* geminiStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
   }
 }
 
+/** OpenAI Responses 接口（/v1/responses）的流式调用 */
+async function* responsesStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
+  const { provider } = o;
+  const headers: Record<string, string> = {};
+  if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
+  if (provider.baseUrl.includes('openrouter.ai')) headers['X-Title'] = 'Inkwell Novel';
+  const base = provider.baseUrl.replace(/\/responses\/?$/, '');
+  const body: Record<string, unknown> = {
+    model: o.model,
+    input: o.messages.filter((m) => m.role !== 'system').map((m) => ({ role: m.role, content: m.content })),
+    stream: true,
+    store: false,
+    // 推理模型返回思考摘要；普通模型不支持时会被参数回退去掉
+    reasoning: { summary: 'auto' },
+  };
+  const system = systemText(o.messages);
+  if (system) body.instructions = system;
+  if (o.temperature !== undefined) body.temperature = o.temperature;
+  if (o.maxTokens) body.max_output_tokens = o.maxTokens;
+  const res = await postWithParamFallback(
+    joinUrl(base, '/responses'),
+    headers,
+    body,
+    ['reasoning', 'temperature', 'max_output_tokens', 'store'],
+    o.signal,
+  );
+  if (!res.ok || !res.body) throw await describeError(res);
+  let gotText = false;
+  let refusal = '';
+  for await (const ev of sseEvents(res.body)) {
+    if (ev.data === '[DONE]') break;
+    let json: any;
+    try {
+      json = JSON.parse(ev.data);
+    } catch {
+      continue;
+    }
+    const type = json.type ?? ev.event;
+    if (type === 'response.output_text.delta') {
+      if (typeof json.delta === 'string' && json.delta) {
+        gotText = true;
+        yield { type: 'text', text: json.delta };
+      }
+    } else if (type === 'response.reasoning_summary_text.delta' || type === 'response.reasoning_text.delta') {
+      if (typeof json.delta === 'string' && json.delta) yield { type: 'reasoning', text: json.delta };
+    } else if (type === 'response.reasoning_summary_part.added') {
+      if (json.summary_index > 0) yield { type: 'reasoning', text: '\n\n' };
+    } else if (type === 'response.refusal.delta') {
+      if (typeof json.delta === 'string') refusal += json.delta;
+    } else if (type === 'error') {
+      throw new LlmError(json.message ?? json.error?.message ?? 'Responses 接口返回错误');
+    } else if (type === 'response.failed') {
+      throw new LlmError(json.response?.error?.message ?? '生成失败（response.failed）');
+    } else if (type === 'response.incomplete') {
+      if (json.response?.incomplete_details?.reason === 'content_filter') throw new LlmError('内容被安全策略拦截，输出不完整');
+      break;
+    } else if (type === 'response.completed') {
+      // 个别中转不推送增量，只在结束时给出完整结果
+      if (!gotText) {
+        const text = (json.response?.output ?? [])
+          .flatMap((item: any) => item?.content ?? [])
+          .filter((c: any) => c?.type === 'output_text' && typeof c.text === 'string')
+          .map((c: any) => c.text)
+          .join('');
+        if (text) {
+          gotText = true;
+          yield { type: 'text', text };
+        }
+      }
+      break;
+    }
+  }
+  if (!gotText && refusal) throw new LlmError(`模型拒绝了这个请求：${refusal.slice(0, 300)}`);
+}
+
 /** 一些推理模型把思考过程放在正文的 <think>…</think> 里，这里拆出来 */
 export async function* splitThinkTags(src: AsyncIterable<LlmChunk>): AsyncGenerator<LlmChunk> {
   const OPEN = '<think>';
@@ -333,6 +408,8 @@ export function streamChat(o: LlmOptions): AsyncGenerator<LlmChunk> {
       return anthropicStream(o);
     case 'gemini':
       return geminiStream(o);
+    case 'responses':
+      return splitThinkTags(responsesStream(o));
     default:
       return splitThinkTags(openaiStream(o));
   }
@@ -349,7 +426,7 @@ export async function listModels(provider: Provider, signal?: AbortSignal): Prom
     url = joinUrl(provider.baseUrl.replace(/\/v1(beta)?\/?$/, ''), '/v1beta/models?pageSize=1000');
     headers['x-goog-api-key'] = provider.apiKey;
   } else {
-    url = joinUrl(provider.baseUrl, '/models');
+    url = joinUrl(provider.kind === 'responses' ? provider.baseUrl.replace(/\/responses\/?$/, '') : provider.baseUrl, '/models');
     if (provider.apiKey) headers.authorization = `Bearer ${provider.apiKey}`;
   }
   let res: Response;

@@ -144,7 +144,8 @@ export interface SearchHit {
   snippet: string;
 }
 
-export type ProviderKind = 'openai' | 'anthropic' | 'gemini';
+/** openai = Chat Completions；responses = OpenAI Responses；anthropic = Messages；gemini = generateContent */
+export type ProviderKind = 'openai' | 'responses' | 'anthropic' | 'gemini';
 
 export interface Provider {
   id: string;

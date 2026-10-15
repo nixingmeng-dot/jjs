@@ -251,6 +251,122 @@ describe('AI pipeline', () => {
   });
 });
 
+describe('OpenAI Responses API', () => {
+  let mock: Server;
+  let baseUrl: string;
+  const bodies: any[] = [];
+
+  const sse = (res: import('node:http').ServerResponse, events: Record<string, unknown>[]) => {
+    res.setHeader('content-type', 'text/event-stream');
+    for (const e of events) res.write(`event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`);
+    res.end();
+  };
+
+  beforeAll(async () => {
+    mock = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        if (req.url === '/v1/models') {
+          res.setHeader('content-type', 'application/json');
+          return res.end(JSON.stringify({ data: [{ id: 'gpt-x' }] }));
+        }
+        if (req.url !== '/v1/responses' || req.headers.authorization !== 'Bearer sk-r') {
+          res.statusCode = 404;
+          return res.end('{}');
+        }
+        const body = JSON.parse(raw || '{}');
+        bodies.push(body);
+        if (body.model === 'plain-model' && body.reasoning) {
+          res.statusCode = 400;
+          return res.end(JSON.stringify({ error: { message: "Unsupported parameter: 'reasoning.summary' is not supported with this model." } }));
+        }
+        if (body.model === 'fail-model') {
+          return sse(res, [
+            { type: 'response.created', response: { id: 'r1' } },
+            { type: 'response.failed', response: { error: { code: 'server_error', message: '上游炸了' } } },
+          ]);
+        }
+        if (body.model === 'final-only') {
+          return sse(res, [{ type: 'response.completed', response: { output: [{ type: 'message', content: [{ type: 'output_text', text: '一次给全。' }] }] } }]);
+        }
+        sse(res, [
+          { type: 'response.created', response: { id: 'r1' } },
+          { type: 'response.reasoning_summary_part.added', summary_index: 0 },
+          { type: 'response.reasoning_summary_text.delta', delta: '想一想', summary_index: 0 },
+          { type: 'response.output_text.delta', delta: '雨', content_index: 0 },
+          { type: 'response.output_text.delta', delta: '停了。', content_index: 0 },
+          { type: 'response.completed', response: { output: [{ type: 'message', content: [{ type: 'output_text', text: '雨停了。' }] }] } },
+        ]);
+      });
+    });
+    await new Promise<void>((r) => mock.listen(0, '127.0.0.1', r));
+    baseUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/v1`;
+  });
+  afterAll(() => mock.close());
+
+  async function run(model: string, url = baseUrl) {
+    const { data: provider } = await call('POST', '/providers', { name: 'R', kind: 'responses', baseUrl: url, apiKey: 'sk-r', models: [model] });
+    const { data: book } = await call('POST', '/books', { title: '长夜' });
+    const { data: tree } = await call<BookTree>('GET', `/books/${book.id}`);
+    bodies.length = 0;
+    const { data } = await call<string>('POST', '/ai/run', { task: 'continue', bookId: book.id, chapterId: tree.chapters[0].id, length: 300 });
+    const events = data
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as AiStreamEvent);
+    const join = (t: string) => events.filter((e) => e.t === t).map((e) => (e as { v: string }).v).join('');
+    return { provider, events, text: join('text'), reasoning: join('reasoning'), error: join('error') };
+  }
+
+  it('streams text and reasoning summary, sending instructions + input', async () => {
+    const r = await run('gpt-x');
+    expect(r.text).toBe('雨停了。');
+    expect(r.reasoning).toBe('想一想');
+    expect(r.events.at(-1)).toEqual({ t: 'done' });
+    const body = bodies[0];
+    expect(body.stream).toBe(true);
+    expect(body.store).toBe(false);
+    expect(body.reasoning).toEqual({ summary: 'auto' });
+    expect(body.instructions).toContain('写作守则');
+    expect(body.input.every((m: any) => m.role !== 'system')).toBe(true);
+    expect(body.input[0].role).toBe('user');
+    expect(typeof body.max_output_tokens).toBe('number');
+  });
+
+  it('accepts a base URL that already ends with /responses', async () => {
+    const r = await run('gpt-x', `${baseUrl}/responses`);
+    expect(r.text).toBe('雨停了。');
+  });
+
+  it('drops only the rejected parameter and retries', async () => {
+    const r = await run('plain-model');
+    expect(r.text).toBe('雨停了。');
+    expect(bodies).toHaveLength(2);
+    expect(bodies[1].reasoning).toBeUndefined();
+    expect(bodies[1].temperature).toBe(bodies[0].temperature);
+    expect(bodies[1].max_output_tokens).toBe(bodies[0].max_output_tokens);
+  });
+
+  it('reports response.failed as an error', async () => {
+    const r = await run('fail-model');
+    expect(r.error).toContain('上游炸了');
+  });
+
+  it('falls back to the completed output when no deltas are streamed', async () => {
+    const r = await run('final-only');
+    expect(r.text).toBe('一次给全。');
+  });
+
+  it('lists models and tests connection', async () => {
+    const { provider } = await run('gpt-x');
+    const { data } = await call('POST', `/providers/${provider.id}/models`);
+    expect(data.models).toEqual(['gpt-x']);
+    const { data: test } = await call('POST', `/providers/${provider.id}/test`, {});
+    expect(test.ok).toBe(true);
+  });
+});
+
 describe('llm stream helpers', () => {
   it('parses SSE split across chunks', async () => {
     const enc = new TextEncoder();
