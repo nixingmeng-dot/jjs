@@ -341,7 +341,7 @@ ${extra}
       return {
         messages: [sys('你是严谨的小说编辑助理，擅长准确、简练地概括剧情。'), user(body)],
         temperature: 0.3,
-        maxTokens: 1024,
+        maxTokens: Math.max(settings.maxTokens, 1024),
       };
     }
 
@@ -369,7 +369,7 @@ ${extra}
 冲突与转折：……
 结尾钩子：……`,
       );
-      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9), maxTokens: 2048 };
+      return { messages: [sys(PLANNER), user(body)], temperature: Math.min(creativeTemp, 0.9), maxTokens: Math.max(settings.maxTokens, 2048) };
     }
 
     case 'outline_book': {

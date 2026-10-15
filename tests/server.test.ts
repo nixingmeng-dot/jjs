@@ -255,6 +255,7 @@ describe('OpenAI Responses API', () => {
   let mock: Server;
   let baseUrl: string;
   const bodies: any[] = [];
+  let busyServed = false;
 
   const sse = (res: import('node:http').ServerResponse, events: Record<string, unknown>[]) => {
     res.setHeader('content-type', 'text/event-stream');
@@ -285,6 +286,18 @@ describe('OpenAI Responses API', () => {
           return sse(res, [
             { type: 'response.created', response: { id: 'r1' } },
             { type: 'response.failed', response: { error: { code: 'server_error', message: '上游炸了' } } },
+          ]);
+        }
+        if (body.model === 'busy-once' && !busyServed) {
+          busyServed = true;
+          res.statusCode = 429;
+          res.setHeader('retry-after', '1');
+          return res.end(JSON.stringify({ error: { message: 'Model serving capacity is currently full; retry later', code: 'model_concurrency' } }));
+        }
+        if (body.model === 'think-only') {
+          return sse(res, [
+            { type: 'response.reasoning_text.delta', delta: 'The user is asking' },
+            { type: 'response.incomplete', response: { status: 'incomplete', incomplete_details: { reason: 'max_output_tokens' }, usage: { output_tokens_details: { reasoning_tokens: 512 } } } },
           ]);
         }
         if (body.model === 'final-only') {
@@ -351,6 +364,19 @@ describe('OpenAI Responses API', () => {
   it('reports response.failed as an error', async () => {
     const r = await run('fail-model');
     expect(r.error).toContain('上游炸了');
+  });
+
+  it('retries once when the provider is at capacity (429)', async () => {
+    const r = await run('busy-once');
+    expect(r.text).toBe('雨停了。');
+    expect(r.error).toBe('');
+  });
+
+  it('explains when a reasoning model runs out of output tokens before writing', async () => {
+    const r = await run('think-only');
+    expect(r.reasoning).toBe('The user is asking');
+    expect(r.error).toContain('512 个 token');
+    expect(r.error).toContain('单次最大输出 tokens');
   });
 
   it('falls back to the completed output when no deltas are streamed', async () => {

@@ -103,7 +103,7 @@ async function describeError(res: Response): Promise<LlmError> {
     401: 'API Key 无效或未填写',
     403: '没有权限访问该模型或接口',
     404: '接口地址或模型名不存在',
-    429: '请求太频繁或账户额度不足',
+    429: '服务商限流、满载或额度不足（已自动重试）',
     500: '服务商内部错误',
     502: '服务商网关错误',
     503: '服务暂时不可用',
@@ -111,17 +111,36 @@ async function describeError(res: Response): Promise<LlmError> {
   return new LlmError(`${hint[res.status] ?? '请求失败'}（HTTP ${res.status}）${detail ? '：' + detail : ''}`, res.status);
 }
 
+function sleep(ms: number, signal?: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    const t = setTimeout(resolve, ms);
+    signal?.addEventListener('abort', () => (clearTimeout(t), reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))), { once: true });
+  });
+}
+
+const RETRY_DELAYS = [1500, 4000];
+
 async function postJson(url: string, headers: Record<string, string>, body: unknown, signal?: AbortSignal) {
-  try {
-    return await fetch(url, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', ...headers },
-      body: JSON.stringify(body),
-      signal,
-    });
-  } catch (err) {
-    if ((err as Error).name === 'AbortError') throw err;
-    throw new LlmError(`无法连接到 ${new URL(url).host}：${(err as Error).message}。请检查接口地址和网络/代理。`);
+  for (let attempt = 0; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', ...headers },
+        body: JSON.stringify(body),
+        signal,
+      });
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') throw err;
+      throw new LlmError(`无法连接到 ${new URL(url).host}：${(err as Error).message}。请检查接口地址和网络/代理。`);
+    }
+    if ((res.status !== 429 && res.status !== 503) || attempt >= RETRY_DELAYS.length) return res;
+    // 满载 / 限流时自动重试；额度不足重试也没用
+    const text = await res.text();
+    if (/quota|insufficient|billing|balance|余额|欠费/i.test(text)) return new Response(text, { status: res.status, headers: res.headers });
+    const after = Number(res.headers.get('retry-after'));
+    await sleep(after > 0 && after <= 10 ? after * 1000 : RETRY_DELAYS[attempt], signal);
   }
 }
 
@@ -337,7 +356,14 @@ async function* responsesStream(o: LlmOptions): AsyncGenerator<LlmChunk> {
     } else if (type === 'response.failed') {
       throw new LlmError(json.response?.error?.message ?? '生成失败（response.failed）');
     } else if (type === 'response.incomplete') {
-      if (json.response?.incomplete_details?.reason === 'content_filter') throw new LlmError('内容被安全策略拦截，输出不完整');
+      const reason = json.response?.incomplete_details?.reason;
+      if (reason === 'content_filter') throw new LlmError('内容被安全策略拦截，输出不完整');
+      if (reason === 'max_output_tokens' && !gotText) {
+        const used = json.response?.usage?.output_tokens_details?.reasoning_tokens;
+        throw new LlmError(
+          `输出额度用完了：模型${used ? `把 ${used} 个 token 都用在了思考上，` : ''}还没开始写正文。请到「设置 → 生成参数」调高「单次最大输出 tokens」（推理模型建议 16000 以上）。`,
+        );
+      }
       break;
     } else if (type === 'response.completed') {
       // 个别中转不推送增量，只在结束时给出完整结果
