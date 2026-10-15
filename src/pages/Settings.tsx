@@ -50,7 +50,7 @@ export default function SettingsPage() {
         </Section>
         <AntiAiSection settings={settings} update={updateSettings} />
         <Section title="编辑器与外观">
-          <div className="grid gap-5 sm:grid-cols-3">
+          <div className="grid gap-5 sm:grid-cols-2">
             <Field label="主题">
               <Segmented
                 value={settings.theme}
@@ -59,6 +59,17 @@ export default function SettingsPage() {
                   { value: 'light', label: '明亮' },
                   { value: 'sepia', label: '护眼' },
                   { value: 'dark', label: '夜间' },
+                ]}
+              />
+            </Field>
+            <Field label="正文字体" hint="宋体、楷体已内置，无需联网">
+              <Segmented
+                value={settings.editorFont}
+                onChange={(editorFont) => updateSettings({ editorFont })}
+                options={[
+                  { value: 'sans', label: '黑体' },
+                  { value: 'serif', label: '宋体' },
+                  { value: 'kai', label: '楷体' },
                 ]}
               />
             </Field>
@@ -131,7 +142,7 @@ function AntiAiSection({ settings, update }: { settings: AppSettings; update: (p
             placeholder="例如：淡淡的，一丝丝，不由自主"
           />
         </Field>
-        <button type="button" className="text-xs text-accent hover:underline" onClick={() => setShowBuiltin((v) => !v)}>
+        <button type="button" className="text-xs text-ai hover:underline" onClick={() => setShowBuiltin((v) => !v)}>
           {showBuiltin ? '收起' : '查看'}内置的高频套话清单（{PROMPT_BANNED_PHRASES.length} 条，检测器另有 100+ 条规则）
         </button>
         {showBuiltin && (
@@ -357,7 +368,7 @@ function ProviderModal({ provider, presetKey, onClose, onSaved }: { provider: Pr
           label="API Key"
           hint={
             hint?.keyUrl ? (
-              <a href={hint.keyUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-accent hover:underline">
+              <a href={hint.keyUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-ai hover:underline">
                 获取 Key <ExternalLink className="size-3" />
               </a>
             ) : hint?.noKey ? (

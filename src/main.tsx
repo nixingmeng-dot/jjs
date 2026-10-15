@@ -2,6 +2,9 @@ import { StrictMode, useEffect } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, Route, Routes } from 'react-router';
 import { Spinner, Toasts } from './components/ui';
+// 字体随程序打包，按 unicode-range 分片，只在用到时加载，不依赖网络
+import '@fontsource-variable/noto-serif-sc';
+import 'lxgw-wenkai-screen-webfont/lxgwwenkaigbscreen.css';
 import './index.css';
 import BookInfoPage from './pages/BookInfo';
 import BookLayout from './pages/BookLayout';
@@ -33,6 +36,10 @@ function App() {
   useEffect(() => {
     document.documentElement.dataset.theme = settings?.theme ?? 'light';
   }, [settings?.theme]);
+
+  useEffect(() => {
+    document.documentElement.dataset.editorFont = settings?.editorFont ?? 'sans';
+  }, [settings?.editorFont]);
 
   if (!settings) {
     return (

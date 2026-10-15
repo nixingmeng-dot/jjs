@@ -171,6 +171,8 @@ export interface AppSettings {
   extraBannedWords: string;
   editorFontSize: number;
   editorWidth: number;
+  /** 正文字体：系统黑体 / 内置思源宋体 / 内置霞鹜文楷 */
+  editorFont: 'sans' | 'serif' | 'kai';
   theme: 'light' | 'dark' | 'sepia';
 }
 

@@ -21,19 +21,24 @@ const MIRROR_PROPS = [
   'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth', 'boxSizing', 'textIndent', 'tabSize',
 ] as const;
 
-export function caretTop(ta: HTMLTextAreaElement, pos: number): number {
+/** 用一个排版相同的隐藏镜像测出正文某个位置在输入框内的坐标 */
+export function caretCoords(ta: HTMLTextAreaElement, pos: number, text = ta.value): { top: number; left: number; lineHeight: number } {
   const div = document.createElement('div');
   const cs = getComputedStyle(ta);
   for (const p of MIRROR_PROPS) div.style[p] = cs[p];
   Object.assign(div.style, { position: 'absolute', visibility: 'hidden', top: '0', left: '-9999px', width: ta.clientWidth + 'px' });
-  div.textContent = ta.value.slice(0, pos);
+  div.textContent = text.slice(0, pos);
   const span = document.createElement('span');
   span.textContent = '\u200b';
   div.appendChild(span);
   document.body.appendChild(div);
-  const top = span.offsetTop;
+  const out = { top: span.offsetTop, left: span.offsetLeft, lineHeight: parseFloat(cs.lineHeight) || span.offsetHeight };
   div.remove();
-  return top;
+  return out;
+}
+
+export function caretTop(ta: HTMLTextAreaElement, pos: number): number {
+  return caretCoords(ta, pos).top;
 }
 
 export function scrollToPos(ta: HTMLTextAreaElement, scroller: HTMLElement, pos: number) {
@@ -78,7 +83,7 @@ export function FindBar({ editor, content, onClose }: { editor: EditorHandle; co
     editor.select(matches[k], matches[k] + find.length);
   };
   return (
-    <div className="flex flex-wrap items-center gap-1.5 border-b border-line bg-panel px-3 py-1.5">
+    <div className="flex flex-wrap items-center gap-1.5 border-y border-line bg-side px-4 py-1.5">
       <Input
         autoFocus
         value={find}
@@ -236,7 +241,7 @@ export function SnapshotsModal({
                   恢复此版本
                 </Button>
               </div>
-              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-serif text-sm leading-loose whitespace-pre-wrap">
+              <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-editor text-sm leading-loose whitespace-pre-wrap">
                 {active.content ?? <Spinner />}
               </div>
             </>

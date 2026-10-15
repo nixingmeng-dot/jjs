@@ -1,4 +1,4 @@
-import { Brain, ChevronDown, ChevronRight, CircleStop, Copy, RotateCcw, Settings, TriangleAlert } from 'lucide-react';
+import { Brain, ChevronDown, ChevronRight, ChevronsUpDown, CircleStop, Copy, RotateCcw, Settings, TriangleAlert } from 'lucide-react';
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link } from 'react-router';
 import { analyzeAiFlavor, parseWordList } from '../../shared/antiAi';
@@ -13,37 +13,43 @@ export function ModelPicker({ className }: { className?: string }) {
   if (!settings) return null;
   if (!enabled.length) {
     return (
-      <Link to="/settings" className={cx('inline-flex items-center gap-1 text-xs text-accent hover:underline', className)}>
+      <Link to="/settings" className={cx('inline-flex items-center gap-1 text-xs text-ai hover:underline', className)}>
         <Settings className="size-3.5" /> 配置模型 API
       </Link>
     );
   }
   const value = `${settings.defaultProviderId}::${settings.defaultModel}`;
-  const known = enabled.some((p) => p.id === settings.defaultProviderId && p.models.includes(settings.defaultModel));
+  const provider = enabled.find((p) => p.id === settings.defaultProviderId);
+  const known = !!provider && provider.models.includes(settings.defaultModel);
+  // 原生下拉负责交互，上面叠一层可读的「服务商 · 模型」标签
   return (
-    <select
-      value={known ? value : ''}
+    <label
       title="选择模型"
-      onChange={(e) => {
-        const [defaultProviderId, defaultModel] = e.target.value.split('::');
-        updateSettings({ defaultProviderId, defaultModel });
-      }}
-      className={cx(
-        'h-7 max-w-full min-w-0 truncate rounded-md border border-line bg-paper px-1.5 text-xs outline-none focus:border-accent',
-        className,
-      )}
+      className={cx('relative inline-flex h-7 min-w-0 cursor-pointer items-center gap-1.5 rounded-md px-2 text-xs text-ink/80 transition hover:bg-hover', className)}
     >
-      {!known && <option value="">选择模型…</option>}
-      {enabled.map((p) => (
-        <optgroup key={p.id} label={p.name}>
-          {p.models.map((m) => (
-            <option key={m} value={`${p.id}::${m}`}>
-              {m}
-            </option>
-          ))}
-        </optgroup>
-      ))}
-    </select>
+      <span className={cx('size-1.5 shrink-0 rounded-full', known ? 'bg-ok' : 'bg-muted/50')} />
+      <span className="min-w-0 truncate">{known ? `${provider.name} · ${settings.defaultModel}` : '选择模型…'}</span>
+      <ChevronsUpDown className="size-3 shrink-0 text-muted" />
+      <select
+        value={known ? value : ''}
+        onChange={(e) => {
+          const [defaultProviderId, defaultModel] = e.target.value.split('::');
+          updateSettings({ defaultProviderId, defaultModel });
+        }}
+        className="absolute inset-0 cursor-pointer opacity-0"
+      >
+        {!known && <option value="">选择模型…</option>}
+        {enabled.map((p) => (
+          <optgroup key={p.id} label={p.name}>
+            {p.models.map((m) => (
+              <option key={m} value={`${p.id}::${m}`}>
+                {m}
+              </option>
+            ))}
+          </optgroup>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -93,7 +99,7 @@ export function AiResultView({
   const [showReasoning, setShowReasoning] = useState(false);
   if (task.status === 'idle') return placeholder ? <>{placeholder}</> : null;
   return (
-    <div className={cx('rounded-lg border border-line bg-paper', className)}>
+    <div className={cx('rounded-xl border border-line bg-paper shadow-sm', className)}>
       <div className="flex items-center gap-2 border-b border-line px-3 py-1.5 text-[11px] text-muted">
         {task.running ? <Spinner className="size-3.5" /> : null}
         <span className="min-w-0 flex-1 truncate">{task.model || '连接中…'}</span>
@@ -138,7 +144,7 @@ export function AiResultView({
           <div className="min-w-0 break-words">
             {task.error}
             {/模型服务|API|Key|模型/.test(task.error) && (
-              <Link to="/settings" className="ml-1 text-accent underline">
+              <Link to="/settings" className="ml-1 text-ai underline">
                 去设置
               </Link>
             )}
@@ -152,7 +158,7 @@ export function AiResultView({
           placeholder={task.running ? '正在生成…' : ''}
           className={cx(
             'block max-h-[46vh] min-h-24 w-full resize-y overflow-y-auto bg-transparent px-3 py-2.5 text-sm leading-relaxed outline-none',
-            prose && 'font-serif',
+            prose && 'font-editor',
           )}
           rows={Math.min(18, Math.max(4, Math.ceil(task.text.length / 26)))}
         />

@@ -1,47 +1,32 @@
-import { ChevronDown, ChevronRight, FilePlus, FolderPlus, Pencil, Plus, Search, Trash, X } from 'lucide-react';
-import { memo, useEffect, useMemo, useState } from 'react';
+import { ChevronDown, ChevronRight, FolderPlus, Pencil, Plus, Trash } from 'lucide-react';
+import { memo, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { chapterLabels, formatWords } from '../../../shared/text';
-import type { ChapterMeta, SearchHit, Volume } from '../../../shared/types';
-import { api } from '../../api';
-import { confirmAsk, cx, IconButton, Input } from '../../components/ui';
-import { toastError, useBook, useUi } from '../../store';
+import { formatWords } from '../../../shared/text';
+import type { ChapterMeta, Volume } from '../../../shared/types';
+import { confirmAsk, cx, IconButton } from '../../components/ui';
+import { toastError, useBook } from '../../store';
 
 const STATUS_DOT: Record<string, string> = {
-  draft: 'bg-muted/40',
+  draft: 'bg-muted/35',
   revising: 'bg-amber-500',
   done: 'bg-ok',
 };
 
-export const ChapterTree = memo(function ChapterTree({ activeId }: { activeId?: string }) {
+/** 侧栏里的分卷 / 章节目录，支持拖拽排序 */
+export const ChapterTree = memo(function ChapterTree({ activeId, labels }: { activeId?: string; labels: Map<string, string> }) {
   const tree = useBook((s) => s.tree)!;
   const { create, update, remove, reorder } = useBook.getState();
   const navigate = useNavigate();
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
   const [renaming, setRenaming] = useState<string | null>(null);
   const [drag, setDrag] = useState<{ id: string; over?: string; overVolume?: string } | null>(null);
-  const [query, setQuery] = useState('');
-  const [hits, setHits] = useState<SearchHit[] | null>(null);
 
   const ordered = useMemo(() => {
     const out: ChapterMeta[] = [];
     for (const v of tree.volumes) out.push(...tree.chapters.filter((c) => c.volumeId === v.id));
     return out;
   }, [tree.volumes, tree.chapters]);
-  const labels = useMemo(() => chapterLabels(ordered), [ordered]);
   const bookId = tree.book.id;
-
-  useEffect(() => {
-    if (!query.trim()) {
-      setHits(null);
-      return;
-    }
-    const t = setTimeout(async () => {
-      await useBook.getState().flush();
-      api.get<SearchHit[]>(`/books/${bookId}/search?q=${encodeURIComponent(query.trim())}`).then(setHits).catch(toastError);
-    }, 300);
-    return () => clearTimeout(t);
-  }, [query, bookId]);
 
   const go = (id: string) => navigate(`/book/${bookId}/write/${id}`);
 
@@ -104,54 +89,22 @@ export const ChapterTree = memo(function ChapterTree({ activeId }: { activeId?: 
   const lastVolume = tree.chapters.find((c) => c.id === activeId)?.volumeId ?? tree.volumes[tree.volumes.length - 1]?.id;
 
   return (
-    <aside className="flex h-full w-64 shrink-0 flex-col border-r border-line bg-panel">
-      <div className="border-b border-line p-2">
-        <div className="relative">
-          <Search className="pointer-events-none absolute top-2.5 left-2 size-3.5 text-muted" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="全书搜索" className="h-8 pl-7 text-xs" />
-          {query && (
-            <button type="button" className="absolute top-2 right-2 text-muted hover:text-ink" onClick={() => setQuery('')}>
-              <X className="size-4" />
-            </button>
-          )}
-        </div>
+    <div className="flex min-h-0 flex-1 flex-col pt-4">
+      <div className="group flex items-center px-4 pb-1 text-[11.5px] font-medium text-muted">
+        <span className="flex-1">目录</span>
+        <IconButton title="新建分卷" className="size-5 opacity-0 group-hover:opacity-100 focus:opacity-100" onClick={addVolume}>
+          <FolderPlus className="size-3.5" />
+        </IconButton>
       </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto py-1">
-        {hits ? (
-          <div>
-            <div className="px-3 py-1.5 text-[11px] text-muted">找到 {hits.length} 处</div>
-            {hits.map((h, i) => (
-              <button
-                key={i}
-                type="button"
-                onClick={() => {
-                  useUi.getState().setJump({ chapterId: h.chapterId, start: h.index, end: h.index + query.trim().length });
-                  go(h.chapterId);
-                }}
-                className="block w-full px-3 py-1.5 text-left hover:bg-hover"
-              >
-                <div className="truncate text-[11px] text-muted">{labels.get(h.chapterId)}</div>
-                <div className="line-clamp-2 text-xs">
-                  {h.snippet.split(query.trim()).map((part, j, arr) => (
-                    <span key={j}>
-                      {part}
-                      {j < arr.length - 1 && <mark className="rounded-sm bg-accent-soft text-accent">{query.trim()}</mark>}
-                    </span>
-                  ))}
-                </div>
-              </button>
-            ))}
-          </div>
-        ) : (
-          tree.volumes.map((v, vi) => {
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {tree.volumes.map((v, vi) => {
             const chapters = tree.chapters.filter((c) => c.volumeId === v.id);
             const words = chapters.reduce((n, c) => n + c.wordCount, 0);
             const isCollapsed = collapsed[v.id];
             return (
-              <div key={v.id} className="mb-1">
+              <div key={v.id} className="mb-0.5">
                 <div
-                  className={cx('group flex items-center gap-1 px-2 py-1', drag?.overVolume === v.id && !drag.over && 'bg-accent-soft')}
+                  className={cx('group flex h-7 items-center gap-1 rounded-md pr-1 pl-1.5 hover:bg-hover', drag?.overVolume === v.id && !drag.over && 'bg-accent-soft')}
                   onDragOver={(e) => {
                     if (!drag) return;
                     e.preventDefault();
@@ -162,14 +115,14 @@ export const ChapterTree = memo(function ChapterTree({ activeId }: { activeId?: 
                     drop(v.id);
                   }}
                 >
-                  <button type="button" className="text-muted" onClick={() => setCollapsed({ ...collapsed, [v.id]: !isCollapsed })}>
+                  <button type="button" className="flex size-5 items-center justify-center rounded text-muted hover:bg-accent-soft" onClick={() => setCollapsed({ ...collapsed, [v.id]: !isCollapsed })}>
                     {isCollapsed ? <ChevronRight className="size-3.5" /> : <ChevronDown className="size-3.5" />}
                   </button>
                   {renaming === v.id ? (
                     <input
                       autoFocus
                       defaultValue={v.title}
-                      className="min-w-0 flex-1 rounded border border-accent bg-paper px-1 text-xs font-semibold outline-none"
+                      className="min-w-0 flex-1 rounded border border-line bg-paper px-1 text-[13px] font-medium outline-none ring-2 ring-ai/20"
                       onBlur={(e) => {
                         update('volumes', v.id, { title: e.target.value.trim() || v.title }, true);
                         setRenaming(null);
@@ -180,11 +133,11 @@ export const ChapterTree = memo(function ChapterTree({ activeId }: { activeId?: 
                       }}
                     />
                   ) : (
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold" onDoubleClick={() => setRenaming(v.id)} title={v.summary || v.title}>
+                    <span className="min-w-0 flex-1 truncate font-medium text-ink/90" onDoubleClick={() => setRenaming(v.id)} title={v.summary || v.title}>
                       {v.title}
                     </span>
                   )}
-                  <span className="text-[10px] text-muted group-hover:hidden">{formatWords(words)}</span>
+                  <span className="text-[11px] text-muted group-hover:hidden">{words ? (words >= 10000 ? formatWords(words) : words.toLocaleString()) : ''}</span>
                   <div className="hidden items-center group-hover:flex">
                     <IconButton title="上移分卷" className="size-5" disabled={vi === 0} onClick={() => moveVolume(v, -1)}>
                       <ChevronDown className="size-3 rotate-180" />
@@ -226,51 +179,54 @@ export const ChapterTree = memo(function ChapterTree({ activeId }: { activeId?: 
                       }}
                       onClick={() => go(c.id)}
                       className={cx(
-                        'group relative mx-1 flex cursor-pointer items-center gap-2 rounded-md py-1.5 pr-1 pl-6 text-[13px]',
-                        c.id === activeId ? 'bg-accent-soft text-accent' : 'hover:bg-hover',
+                        'group relative flex h-7 cursor-pointer items-center gap-2.5 rounded-md pr-1 pl-8',
+                        c.id === activeId ? 'bg-accent-soft font-medium text-ink' : 'hover:bg-hover',
                         drag?.id === c.id && 'opacity-40',
-                        drag?.over === c.id && drag.id !== c.id && 'before:absolute before:inset-x-2 before:-top-px before:h-0.5 before:bg-accent',
+                        drag?.over === c.id && drag.id !== c.id && 'before:absolute before:inset-x-2 before:-top-px before:h-0.5 before:bg-ai',
                       )}
                     >
                       <span className={cx('size-1.5 shrink-0 rounded-full', STATUS_DOT[c.status])} />
                       <span className="min-w-0 flex-1 truncate">{labels.get(c.id)}</span>
-                      <span className="text-[10px] text-muted group-hover:hidden">{c.wordCount || ''}</span>
-                      <IconButton
-                        title="删除章节"
-                        className="hidden size-5 group-hover:inline-flex hover:text-danger"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          deleteChapter(c);
-                        }}
-                      >
-                        <Trash className="size-3" />
-                      </IconButton>
+                      <span className="text-[11px] font-normal text-muted tabular-nums group-hover:hidden">{c.wordCount ? c.wordCount.toLocaleString() : ''}</span>
+                      <span className="hidden group-hover:inline-flex">
+                        <IconButton
+                          title="删除章节"
+                          className="size-5 hover:text-danger"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            deleteChapter(c);
+                          }}
+                        >
+                          <Trash className="size-3" />
+                        </IconButton>
+                      </span>
                     </div>
                   ))}
                 {!isCollapsed && chapters.length === 0 && (
-                  <button type="button" onClick={() => addChapter(v.id)} className="ml-6 py-1 text-xs text-muted hover:text-accent">
+                  <button type="button" onClick={() => addChapter(v.id)} className="ml-8 h-7 text-xs text-muted hover:text-ink">
                     + 新建章节
                   </button>
                 )}
               </div>
             );
-          })
+          })}
+        {tree.volumes.length === 0 && (
+          <button type="button" onClick={addVolume} className="h-7 px-2 text-xs text-muted hover:text-ink">
+            + 新建分卷
+          </button>
         )}
       </div>
 
-      <div className="flex gap-1 border-t border-line p-2">
+      <div className="px-2 pb-1.5">
         <button
           type="button"
           onClick={() => lastVolume && addChapter(lastVolume)}
           disabled={!lastVolume}
-          className="flex flex-1 items-center justify-center gap-1 rounded-md py-1.5 text-xs hover:bg-hover disabled:opacity-40"
+          className="flex h-[30px] w-full items-center gap-2.5 rounded-md px-2 text-muted hover:bg-hover hover:text-ink disabled:opacity-40"
         >
-          <FilePlus className="size-3.5" /> 新章节
-        </button>
-        <button type="button" onClick={addVolume} className="flex flex-1 items-center justify-center gap-1 rounded-md py-1.5 text-xs hover:bg-hover">
-          <FolderPlus className="size-3.5" /> 新分卷
+          <Plus className="size-4" /> 新建章节
         </button>
       </div>
-    </aside>
+    </div>
   );
 });

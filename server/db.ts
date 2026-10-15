@@ -163,6 +163,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   extraBannedWords: '',
   editorFontSize: 18,
   editorWidth: 760,
+  editorFont: 'sans',
   theme: 'light',
 };
 

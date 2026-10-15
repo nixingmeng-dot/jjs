@@ -1,14 +1,14 @@
-import { Bot, Lightbulb, MessageSquare, ScanSearch, Send, Sparkles, Trash, WandSparkles } from 'lucide-react';
+import { ArrowRight, FileText, Lightbulb, ListTree, MessageSquare, ScanSearch, ScrollText, Send, Sparkles, Trash, WandSparkles, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { analyzeAiFlavor, issuesForPrompt, type FlavorHit, type FlavorReport } from '../../../shared/antiAi';
-import type { AiRequest, ChapterMeta, ChatTurn, RewriteMode } from '../../../shared/types';
-import { api } from '../../api';
+import { analyzeAiFlavor, type FlavorHit, type FlavorReport } from '../../../shared/antiAi';
+import type { ChapterMeta, ChatTurn } from '../../../shared/types';
 import { AiResultView, ModelPicker, useBannedWords } from '../../components/ai';
 import { FlavorReportView } from '../../components/FlavorReport';
-import { Button, cx, Empty, IconButton, Segmented, Select, Textarea } from '../../components/ui';
+import { Button, cx, Empty, IconButton, Kbd, Segmented, Textarea } from '../../components/ui';
 import { useAiTask, type AiTaskHandle } from '../../hooks/useAiTask';
-import { toast, toastError, useBook } from '../../store';
+import { toast, useBook } from '../../store';
 import type { EditorHandle } from './editorParts';
+import { IDEAS, REWRITES, type WriteAssist } from './useWriteAssist';
 
 export interface ChatState {
   task: AiTaskHandle;
@@ -16,42 +16,21 @@ export interface ChatState {
   setMessages: Dispatch<SetStateAction<ChatTurn[]>>;
 }
 
-type Target =
-  | { kind: 'cursor'; pos: number }
-  | { kind: 'range'; start: number; end: number; original: string }
-  | { kind: 'whole' }
-  | { kind: 'field'; field: 'summary' | 'outline' }
-  | { kind: 'none' };
-
-const REWRITES: { mode: RewriteMode; label: string; title: string }[] = [
-  { mode: 'polish', label: '润色', title: '修病句、换准词，不加戏' },
-  { mode: 'expand', label: '扩写', title: '补充动作、细节和潜台词' },
-  { mode: 'condense', label: '精简', title: '删掉重复和解释' },
-  { mode: 'deai', label: '去AI味', title: '去套话、打散句式、删升华' },
-  { mode: 'vivid', label: '画面感', title: '把“告知”改成“展示”' },
-  { mode: 'dialogue', label: '对白', title: '让台词像真人说话，有潜台词' },
-  { mode: 'sensory', label: '感官', title: '加入声音、气味、触感' },
-  { mode: 'tension', label: '张力', title: '加快节奏、制造悬念' },
-  { mode: 'custom', label: '按要求改', title: '按上方「额外要求」修改' },
-];
-
-const IDEAS = [
-  '接下来剧情可以怎么发展？给我几个方向',
-  '这里加一个什么冲突或意外更好看？',
-  '给当前场景想几个具体、独特的细节',
-  '主角此刻可以做一个什么出人意料的选择？',
-  '帮我给新出场的配角起几个名字和一句话人设',
-  '这一章的结尾钩子可以怎么设计？',
-];
-
-/** 去掉模型偶尔带上的标记 */
-function cleanProse(text: string) {
-  return text
-    .replace(/^\s*```[a-z]*\n?/i, '')
-    .replace(/\n?```\s*$/i, '')
-    .replace(/^\s*<<<\s*\n?/, '')
-    .replace(/\n?\s*>>>\s*$/, '')
-    .replace(/\s+$/, '');
+export function LenSelect({ value, onChange, options, className }: { value: number; onChange: (n: number) => void; options: number[]; className?: string }) {
+  return (
+    <select
+      value={value}
+      title="大约生成多少字"
+      onChange={(e) => onChange(Number(e.target.value))}
+      className={cx('h-7 cursor-pointer rounded-md bg-transparent px-1.5 text-xs text-muted outline-none hover:bg-hover hover:text-ink', className)}
+    >
+      {options.map((n) => (
+        <option key={n} value={n}>
+          约 {n} 字
+        </option>
+      ))}
+    </select>
+  );
 }
 
 export function AiPanel({
@@ -61,8 +40,10 @@ export function AiPanel({
   selection,
   report,
   chat,
+  assist,
   highlight,
   setHighlight,
+  onClose,
 }: {
   meta: ChapterMeta;
   editor: EditorHandle;
@@ -70,128 +51,34 @@ export function AiPanel({
   selection: { start: number; end: number };
   report: FlavorReport | null;
   chat: ChatState;
+  assist: WriteAssist;
   highlight: boolean;
   setHighlight: (v: boolean) => void;
+  onClose: () => void;
 }) {
   const [tab, setTab] = useState<'write' | 'check' | 'review' | 'chat'>('write');
   const bookId = useBook((s) => s.tree!.book.id);
-  const task = useAiTask();
   const review = useAiTask();
-  const target = useRef<Target>({ kind: 'none' });
-  const [instruction, setInstruction] = useState('');
-  const [continueLen, setContinueLen] = useState(() => Number(localStorage.getItem('inkwell.continueLen')) || 500);
-  const [draftLen, setDraftLen] = useState(() => Number(localStorage.getItem('inkwell.draftLen')) || 3000);
-  const [kind, setKind] = useState<'prose' | 'plain'>('prose');
-  const banned = useBannedWords();
+  const { task, target: t } = assist;
 
   const selText = content.slice(selection.start, selection.end);
   const hasSel = selText.trim().length > 0;
 
-  const start = (req: Omit<AiRequest, 'bookId' | 'chapterId'>, t: Target, k: 'prose' | 'plain' = 'prose') => {
-    target.current = t;
-    setKind(k);
+  // 从面板发起的动作，结果若在面板里显示，就切回「写作」页签
+  const run = (fn: () => void) => {
+    fn();
     setTab('write');
-    task.run({ bookId, chapterId: meta.id, instruction: instruction.trim() || undefined, ...req });
   };
 
-  const doContinue = () => {
-    const pos = editor.getSelection().end;
-    start(
-      { task: 'continue', before: content.slice(0, pos), after: content.slice(pos), length: continueLen },
-      { kind: 'cursor', pos },
-    );
-  };
-
-  const doRewrite = (mode: RewriteMode) => {
-    const sel = editor.getSelection();
-    const text = sel.text.trim() ? sel.text : selText;
-    const s = sel.text.trim() ? sel.start : selection.start;
-    const e = sel.text.trim() ? sel.end : selection.end;
-    if (!text.trim()) return toast('请先在正文中选中要改写的文字', 'error');
-    if (mode === 'custom' && !instruction.trim()) return toast('请先在「额外要求」里写下修改要求', 'error');
-    start(
-      { task: 'rewrite', mode, text, before: content.slice(Math.max(0, s - 800), s), after: content.slice(e, e + 300) },
-      { kind: 'range', start: s, end: e, original: text },
-    );
-  };
-
-  const doDeai = (scope: 'selection' | 'whole') => {
-    const isSel = scope === 'selection' && hasSel;
-    const text = isSel ? selText : content;
-    if (!text.trim()) return toast('没有可处理的文字', 'error');
-    const r = analyzeAiFlavor(text, { extraBanned: banned });
-    start(
-      { task: 'deai', text, issues: issuesForPrompt(r) },
-      isSel ? { kind: 'range', start: selection.start, end: selection.end, original: text } : { kind: 'whole' },
-    );
-  };
-
-  /** 对已生成的结果再做一轮针对性去 AI 味，应用目标不变 */
-  const deaiResult = () => {
-    const text = task.text;
-    const r = analyzeAiFlavor(text, { extraBanned: banned });
-    task.run({ bookId, chapterId: meta.id, task: 'deai', text, issues: issuesForPrompt(r) });
-  };
-
-  // ---------- 应用结果 ----------
-  const apply = async (how: 'replace' | 'insert' | 'append' | 'after') => {
-    const text = cleanProse(task.text);
-    if (!text) return;
-    const cur = editor.getText();
-    const t = target.current;
-    if (how === 'append') {
-      const sep = cur.trim() ? (cur.endsWith('\n') ? '' : '\n') : '';
-      editor.replaceRange(cur.length, cur.length, sep + text);
-    } else if (t.kind === 'cursor' && how === 'insert') {
-      const pos = Math.min(t.pos, cur.length);
-      // 光标停在一句话结尾且位于段末时，续写另起一段
-      const atParagraphEnd = /[。！？…”」』]$/.test(cur.slice(0, pos)) && (pos === cur.length || cur[pos] === '\n');
-      editor.replaceRange(pos, pos, atParagraphEnd && !text.startsWith('\n') ? '\n' + text : text);
-    } else if (t.kind === 'range') {
-      let s = t.start;
-      let e = t.end;
-      if (cur.slice(s, e) !== t.original) {
-        s = cur.indexOf(t.original);
-        e = s + t.original.length;
-      }
-      if (s < 0) {
-        const pos = editor.getSelection().end;
-        editor.replaceRange(pos, pos, text);
-        toast('原文已经改动，已插入到光标处');
-      } else if (how === 'after') {
-        editor.replaceRange(e, e, '\n' + text);
-      } else {
-        editor.replaceRange(s, e, text, true);
-      }
-    } else if (t.kind === 'whole' && how === 'replace') {
-      if (cur.trim()) await api.post(`/chapters/${meta.id}/snapshots`, { note: 'AI 改写前自动保存', content: cur }).catch(toastError);
-      editor.replaceRange(0, cur.length, text);
-    } else {
-      const pos = editor.getSelection().end;
-      editor.replaceRange(pos, pos, text);
-    }
-    task.reset();
-    toast('已写入正文，可用 Ctrl+Z 撤销', 'ok');
-  };
-
-  const saveField = (field: 'summary' | 'outline', mode: 'replace' | 'append') => {
-    const text = task.text.trim();
-    const prev = (useBook.getState().tree?.chapters.find((c) => c.id === meta.id)?.[field] ?? '').trim();
-    useBook.getState().update('chapters', meta.id, { [field]: mode === 'append' && prev ? `${prev}\n\n${text}` : text }, true);
-    task.reset();
-    toast(field === 'summary' ? '已保存为本章摘要' : '已保存为本章细纲', 'ok');
-  };
-
-  const t = target.current;
   const resultActions = (() => {
     if (t.kind === 'field')
       return (
         <>
-          <Button size="sm" variant="primary" onClick={() => saveField(t.field, 'replace')}>
+          <Button size="sm" variant="primary" onClick={() => assist.saveField(t.field, 'replace')}>
             保存为{t.field === 'summary' ? '本章摘要' : '本章细纲'}
           </Button>
           {t.field === 'outline' && meta.outline && (
-            <Button size="sm" onClick={() => saveField('outline', 'append')}>
+            <Button size="sm" onClick={() => assist.saveField('outline', 'append')}>
               追加到细纲
             </Button>
           )}
@@ -200,30 +87,15 @@ export function AiPanel({
     if (t.kind === 'none') return null;
     return (
       <>
-        {t.kind === 'cursor' && (
-          <Button size="sm" variant="primary" onClick={() => apply('insert')}>
-            插入到光标处
-          </Button>
-        )}
-        {t.kind === 'range' && (
-          <>
-            <Button size="sm" variant="primary" onClick={() => apply('replace')}>
-              替换原文
-            </Button>
-            <Button size="sm" onClick={() => apply('after')}>
-              插到原文后
-            </Button>
-          </>
-        )}
         {t.kind === 'whole' && content.trim() && (
-          <Button size="sm" variant="primary" onClick={() => apply('replace')} title="替换前会自动保存历史版本">
+          <Button size="sm" variant="primary" onClick={() => assist.apply('replace')} title="替换前会自动保存历史版本">
             替换全文
           </Button>
         )}
-        <Button size="sm" variant={t.kind === 'whole' && !content.trim() ? 'primary' : 'secondary'} onClick={() => apply('append')}>
+        <Button size="sm" variant={t.kind === 'whole' && !content.trim() ? 'primary' : 'secondary'} onClick={() => assist.apply('append')}>
           {t.kind === 'whole' && !content.trim() ? '写入正文' : '追加到末尾'}
         </Button>
-        <Button size="sm" icon={<WandSparkles className="size-3.5" />} onClick={deaiResult} title="检测这段结果的 AI 味，并让模型针对性改写">
+        <Button size="sm" icon={<WandSparkles className="size-3.5" />} onClick={assist.deaiResult} title="检测这段结果的 AI 味，并让模型针对性改写">
           再去AI味
         </Button>
       </>
@@ -231,140 +103,132 @@ export function AiPanel({
   })();
 
   return (
-    <aside className="flex h-full w-[380px] shrink-0 flex-col border-l border-line bg-panel">
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-        <Bot className="size-4 shrink-0 text-accent" />
-        <ModelPicker className="min-w-0 flex-1" />
+    <aside className="flex h-full w-[360px] shrink-0 flex-col border-l border-line bg-side">
+      <div className="flex h-11 shrink-0 items-center gap-1.5 pr-2 pl-4">
+        <Sparkles className="size-4 shrink-0 text-ai" />
+        <span className="text-[13.5px] font-semibold">AI 助手</span>
+        <ModelPicker className="ml-auto min-w-0" />
+        <IconButton title="收起（Ctrl+J）" onClick={onClose}>
+          <X className="size-4" />
+        </IconButton>
       </div>
-      <div className="flex border-b border-line px-2">
+      <div className="flex gap-1 border-b border-line px-3">
         {(
           [
-            ['write', '写作', Sparkles],
-            ['check', '去AI味', ScanSearch],
-            ['review', '审稿', Lightbulb],
-            ['chat', '对话', MessageSquare],
+            ['write', '写作'],
+            ['check', '去AI味'],
+            ['review', '审稿'],
+            ['chat', '对话'],
           ] as const
-        ).map(([k, l, Icon]) => (
+        ).map(([k, l]) => (
           <button
             key={k}
             type="button"
             onClick={() => setTab(k)}
             className={cx(
-              'flex flex-1 items-center justify-center gap-1 border-b-2 py-2 text-xs transition',
-              tab === k ? 'border-accent font-medium text-accent' : 'border-transparent text-muted hover:text-ink',
+              '-mb-px flex items-center gap-1 border-b-2 px-2 py-2 text-[13px] transition',
+              tab === k ? 'border-ink font-medium text-ink' : 'border-transparent text-muted hover:text-ink',
             )}
           >
-            <Icon className="size-3.5" />
             {l}
             {k === 'check' && report && report.chars > 30 && (
-              <span className={cx('rounded px-1 text-[10px]', report.score >= 40 ? 'bg-danger/12 text-danger' : 'bg-hover')}>{report.score}</span>
+              <span className={cx('rounded px-1 text-[10.5px] tabular-nums', report.score >= 40 ? 'bg-danger/12 text-danger' : 'bg-hover text-muted')}>{report.score}</span>
             )}
           </button>
         ))}
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         {tab === 'write' && (
-          <div className="space-y-4">
-            <Textarea
-              value={instruction}
-              onChange={(e) => setInstruction(e.target.value)}
-              minRows={2}
-              placeholder="额外要求（可选）：例如“让林晚先开口，语气冷一点”“这段节奏要快”"
-              className="text-xs"
-            />
-
-            <Group title="生成">
-              <div className="flex gap-1.5">
-                <Button size="sm" variant="primary" className="flex-1" onClick={doContinue} loading={task.running && task.request?.task === 'continue'} disabled={task.running}>
-                  从光标处续写
-                </Button>
-                <Select
-                  value={continueLen}
-                  onChange={(e) => {
-                    setContinueLen(Number(e.target.value));
-                    localStorage.setItem('inkwell.continueLen', e.target.value);
-                  }}
-                  className="h-7 w-28 text-xs"
-                >
-                  {[200, 500, 1000, 2000].map((n) => (
-                    <option key={n} value={n}>
-                      约 {n} 字
-                    </option>
-                  ))}
-                </Select>
-              </div>
-              <div className="flex gap-1.5">
-                <Button
-                  size="sm"
-                  className="flex-1"
+          <div className="space-y-5">
+            <div className="overflow-hidden rounded-xl border border-line bg-paper focus-within:ring-2 focus-within:ring-ai/15">
+              <Textarea
+                value={assist.instruction}
+                onChange={(e) => assist.setInstruction(e.target.value)}
+                minRows={2}
+                placeholder="额外要求（可选）：例如“让林晚先开口，语气冷一点”"
+                className="border-0 bg-transparent text-[13px] focus:ring-0"
+              />
+              <div className="flex items-center gap-1 px-2 pb-2">
+                <LenSelect value={assist.continueLen} onChange={assist.setContinueLen} options={[200, 500, 1000, 2000]} />
+                <div className="flex-1" />
+                <button
+                  type="button"
                   disabled={task.running}
-                  title={meta.outline ? '根据本章细纲、前情和人物设定起草整章' : '建议先写好本章细纲'}
-                  onClick={() => start({ task: 'draft', length: draftLen }, { kind: 'whole' })}
+                  onClick={() => run(() => assist.doContinue())}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-lg bg-ai px-3 text-[13px] font-medium text-white transition hover:brightness-110 disabled:opacity-50"
                 >
-                  按细纲写本章
-                </Button>
-                <Select
-                  value={draftLen}
-                  onChange={(e) => {
-                    setDraftLen(Number(e.target.value));
-                    localStorage.setItem('inkwell.draftLen', e.target.value);
-                  }}
-                  className="h-7 w-28 text-xs"
-                >
-                  {[2000, 3000, 4000, 6000].map((n) => (
-                    <option key={n} value={n}>
-                      约 {n} 字
-                    </option>
-                  ))}
-                </Select>
+                  <Sparkles className="size-3.5" />
+                  从光标处续写
+                  <span className="text-[11px] opacity-70">Ctrl ↵</span>
+                </button>
               </div>
-              <div className="grid grid-cols-2 gap-1.5">
-                <Button size="sm" disabled={task.running} onClick={() => start({ task: 'chapter_outline' }, { kind: 'field', field: 'outline' }, 'plain')}>
-                  生成本章细纲
-                </Button>
-                <Button
-                  size="sm"
-                  disabled={task.running || !content.trim()}
-                  title="写完后生成摘要，AI 写后续章节时会作为前情提要"
-                  onClick={() => start({ task: 'summary' }, { kind: 'field', field: 'summary' }, 'plain')}
-                >
-                  生成本章摘要
-                </Button>
-              </div>
+            </div>
+
+            <Group title="本章">
+              <ActionRow
+                icon={<FileText className="size-4" />}
+                label="按细纲写本章"
+                hint={meta.outline ? undefined : '建议先写细纲'}
+                disabled={task.running}
+                onClick={() => run(assist.doDraft)}
+                extra={<LenSelect value={assist.draftLen} onChange={assist.setDraftLen} options={[2000, 3000, 4000, 6000]} />}
+              />
+              <ActionRow icon={<ListTree className="size-4" />} label="生成本章细纲" disabled={task.running} onClick={() => run(() => assist.genField('outline'))} />
+              <ActionRow
+                icon={<ScrollText className="size-4" />}
+                label="生成本章摘要"
+                hint="供后续章节参考"
+                disabled={task.running || !content.trim()}
+                onClick={() => run(() => assist.genField('summary'))}
+              />
             </Group>
 
             <Group title={hasSel ? `改写选中的 ${selText.length} 字` : '改写（先在正文中选中文字）'}>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="flex flex-wrap gap-1.5">
                 {REWRITES.map((r) => (
-                  <Button key={r.mode} size="sm" title={r.title} disabled={!hasSel || task.running} onClick={() => doRewrite(r.mode)}>
-                    {r.label}
-                  </Button>
-                ))}
-              </div>
-            </Group>
-
-            <Group title="灵感">
-              <div className="flex flex-wrap gap-1">
-                {IDEAS.map((q) => (
                   <button
-                    key={q}
+                    key={r.mode}
                     type="button"
-                    disabled={task.running}
-                    onClick={() => {
-                      target.current = { kind: 'none' };
-                      setKind('plain');
-                      task.run({ bookId, chapterId: meta.id, task: 'brainstorm', instruction: instruction.trim() ? `${q}\n补充：${instruction.trim()}` : q, before: content.slice(0, editor.getSelection().end) });
-                    }}
-                    className="rounded-full border border-line px-2 py-0.5 text-left text-[11px] text-muted hover:border-accent hover:text-accent disabled:opacity-50"
+                    title={r.title}
+                    disabled={!hasSel || task.running}
+                    onClick={() => assist.doRewrite(r.mode)}
+                    className="rounded-md border border-line bg-paper px-2.5 py-1 text-[12.5px] transition hover:border-ai/40 hover:text-ai disabled:pointer-events-none disabled:opacity-45"
                   >
-                    {q}
+                    {r.label}
                   </button>
                 ))}
               </div>
             </Group>
 
-            <AiResultView task={task} actions={resultActions} prose={kind === 'prose'} showFlavor={kind === 'prose'} />
+            <Group title="灵感">
+              <div className="-mx-2">
+                {IDEAS.map((q) => (
+                  <button
+                    key={q}
+                    type="button"
+                    disabled={task.running}
+                    onClick={() => run(() => assist.brainstorm(q))}
+                    className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] text-ink/75 hover:bg-hover hover:text-ink disabled:opacity-50"
+                  >
+                    <Lightbulb className="size-3.5 shrink-0 text-muted" />
+                    <span className="min-w-0 flex-1">{q}</span>
+                    <ArrowRight className="size-3.5 shrink-0 text-muted opacity-0 group-hover:opacity-100" />
+                  </button>
+                ))}
+              </div>
+            </Group>
+
+            {assist.placement === 'inline' ? (
+              <div className="rounded-xl border border-dashed border-ai/40 bg-ai-soft/60 px-3.5 py-3 text-[12.5px] leading-relaxed text-ai">
+                {assist.label}的结果显示在正文里。
+                <span className="ml-1 text-ink/70">
+                  <Kbd>Tab</Kbd> 接受 · <Kbd>Esc</Kbd> {task.running ? '停止' : '放弃'}
+                </span>
+              </div>
+            ) : (
+              <AiResultView task={task} actions={resultActions} prose={assist.kind === 'prose'} showFlavor={assist.kind === 'prose'} />
+            )}
           </div>
         )}
 
@@ -377,7 +241,7 @@ export function AiPanel({
             highlight={highlight}
             setHighlight={setHighlight}
             onLocate={(h, offset) => editor.select(h.start + offset, h.end + offset)}
-            onDeai={doDeai}
+            onDeai={(scope) => run(() => assist.doDeai(scope))}
             running={task.running}
           />
         )}
@@ -404,10 +268,37 @@ export function AiPanel({
   );
 }
 
+function ActionRow({
+  icon,
+  label,
+  hint,
+  extra,
+  onClick,
+  disabled,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  hint?: string;
+  extra?: React.ReactNode;
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="-mx-2 flex items-center rounded-md hover:bg-hover">
+      <button type="button" disabled={disabled} onClick={onClick} className="flex min-w-0 flex-1 items-center gap-2.5 px-2 py-1.5 text-left text-[13px] disabled:opacity-45">
+        <span className="text-muted">{icon}</span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        {hint && <span className="shrink-0 text-[11px] text-muted">{hint}</span>}
+      </button>
+      {extra}
+    </div>
+  );
+}
+
 function Group({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
-      <div className="text-[11px] font-medium tracking-wide text-muted">{title}</div>
+      <div className="text-[11.5px] font-medium text-muted">{title}</div>
       {children}
     </div>
   );
