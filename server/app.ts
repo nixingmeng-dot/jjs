@@ -17,7 +17,16 @@ function maskProvider(p: Provider): Provider {
   };
 }
 
-export function createApp(repo: Repo) {
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]']);
+const isLoopback = (url: string) => {
+  try {
+    return LOOPBACK.has(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+};
+
+export function createApp(repo: Repo, opts: { localOnly?: boolean } = {}) {
   const app = new Hono();
 
   app.onError((err, c) => {
@@ -26,6 +35,16 @@ export function createApp(repo: Repo) {
     console.error(err);
     return c.json({ error: err.message || '服务器内部错误' }, 500);
   });
+
+  // 只监听本机时，拒绝 Host 不是本机的请求（防 DNS 重绑定读取作品、改服务商地址套取 Key）
+  // 和来自其他网站的请求（防跨站提交，例如偷偷调用 AI 消耗额度）
+  if (opts.localOnly) {
+    app.use('*', async (c, next) => {
+      const origin = c.req.header('origin');
+      if (!isLoopback(c.req.url) || (origin !== undefined && !isLoopback(origin))) return c.json({ error: '只接受来自本机的请求' }, 403);
+      await next();
+    });
+  }
 
   const api = new Hono();
   const body = async <T = Record<string, unknown>>(c: { req: { json: () => Promise<unknown> } }) =>

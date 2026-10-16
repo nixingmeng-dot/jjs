@@ -458,6 +458,29 @@ describe('OpenAI Responses API', () => {
   });
 });
 
+describe('local-only guard', () => {
+  const req = (url: string, init: RequestInit = {}) => createApp(repo, { localOnly: true }).fetch(new Request(url, init));
+
+  it('serves requests addressed to the local machine', async () => {
+    for (const host of ['127.0.0.1:8787', 'localhost:8787', '[::1]:8787']) expect((await req(`http://${host}/api/health`)).status).toBe(200);
+    const res = await req('http://127.0.0.1:8787/api/books', {
+      method: 'POST',
+      headers: { origin: 'http://localhost:5173', 'content-type': 'application/json' },
+      body: JSON.stringify({ title: '本机' }),
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects DNS-rebinding hosts and cross-site requests', async () => {
+    expect((await req('http://evil.example:8787/api/providers')).status).toBe(403);
+    for (const origin of ['https://evil.example', 'null']) {
+      const res = await req('http://127.0.0.1:8787/api/ai/run', { method: 'POST', headers: { origin, 'content-type': 'text/plain' }, body: '{"task":"brainstorm"}' });
+      expect(res.status).toBe(403);
+    }
+    expect(repo.listBooks()).toHaveLength(0);
+  });
+});
+
 describe('model limits', () => {
   it('normalizes ids across providers', () => {
     expect(normalizeModelId('deepseek-ai/DeepSeek-V4.1-Flash')).toBe('deepseek-v4.1-flash');

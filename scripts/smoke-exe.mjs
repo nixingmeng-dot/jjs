@@ -1,15 +1,19 @@
 // 免安装版启动测试：node scripts/smoke-exe.mjs <可执行文件>
 // 检查：能启动、界面和字体从 exe 内部读出、能读写数据（data 在 exe 旁边）、重复启动会识别已运行的实例、没有多余警告。
 import { spawn } from 'node:child_process';
-import { existsSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, join, resolve } from 'node:path';
 
-const exe = resolve(process.argv[2] ?? '');
-if (!existsSync(exe)) throw new Error(`找不到 ${exe}`);
+const source = resolve(process.argv[2] ?? '');
+if (!existsSync(source)) throw new Error(`找不到 ${source}`);
+// 复制到临时目录再运行：测试会新建数据，不能碰真实 exe 旁边的 data 文件夹
+const sandbox = mkdtempSync(join(tmpdir(), 'inkwell-smoke-'));
+const exe = join(sandbox, basename(source));
+copyFileSync(source, exe);
 const port = 18787;
 const base = `http://127.0.0.1:${port}`;
-const dataDir = join(dirname(exe), 'data');
-rmSync(dataDir, { recursive: true, force: true });
+const dataDir = join(sandbox, 'data');
 
 const env = { ...process.env, PORT: String(port), INKWELL_OPEN: '0' };
 delete env.INKWELL_DATA_DIR;
@@ -61,9 +65,13 @@ try {
   const code = await Promise.race([second.exited, new Promise((r) => setTimeout(() => r('timeout'), 15_000))]);
   ok(code === 0 && second.output().includes('已经在运行'), '重复启动时识别到已运行的实例并退出');
 
+  const evil = await fetch(`${base}/api/health`, { headers: { origin: 'https://evil.example' } });
+  ok(evil.status === 403, '拒绝来自其他网站的请求');
+
   ok(!/ExperimentalWarning|Warning:/.test(first.output()), '没有输出实验性功能警告');
   console.log('\n----- exe 输出 -----\n' + first.output().trim());
 } finally {
   first.child.kill();
   await first.exited;
+  rmSync(sandbox, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 });
 }

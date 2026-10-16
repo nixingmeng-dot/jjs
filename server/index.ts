@@ -95,7 +95,7 @@ try {
 }
 
 if (repo!) {
-  const app = createApp(repo);
+  const app = createApp(repo, { localOnly: ['127.0.0.1', 'localhost', '::1'].includes(hostname) });
   if (packaged) {
     serveEmbedded(app);
   } else if (process.env.NODE_ENV === 'production' || existsSync(join(resolve(process.cwd(), 'dist'), 'index.html'))) {

@@ -102,6 +102,80 @@ async function makeBinary(base, target, opts = {}) {
   if (!opts.windows) chmodSync(target, 0o755);
 }
 
+const MIT = (holder) => `MIT License
+
+Copyright (c) ${holder}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`;
+
+/** Node.js 的许可证（随 node.exe 一起分发） */
+async function nodeLicense() {
+  const dir = dirname(process.execPath);
+  const local = [join(dir, 'LICENSE'), join(dir, '..', 'LICENSE')].find(existsSync);
+  if (local) return readFileSync(local, 'utf8');
+  const file = join(cache, `node-${version}-LICENSE`);
+  if (existsSync(file)) return readFileSync(file, 'utf8');
+  const text = (await download([`https://raw.githubusercontent.com/nodejs/node/${version}/LICENSE`])).toString();
+  if (!/Node\.js is licensed/.test(text)) throw new Error('下载的 Node.js LICENSE 内容不对');
+  mkdirSync(cache, { recursive: true });
+  writeFileSync(file, text);
+  return text;
+}
+
+/** exe 里实际包含的 npm 包：运行时依赖去掉只在源码版启动时用的 tsx、cross-env，按 package-lock 展开 */
+function shippedPackages() {
+  const lock = JSON.parse(readFileSync(join(root, 'package-lock.json'), 'utf8')).packages;
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const resolveDep = (from, name) => {
+    for (let base = from; ; base = base.slice(0, base.lastIndexOf('/node_modules/'))) {
+      const key = `${base ? base + '/' : ''}node_modules/${name}`;
+      if (lock[key]) return key;
+      if (!base.includes('/node_modules/')) return lock[`node_modules/${name}`] ? `node_modules/${name}` : null;
+    }
+  };
+  const seen = new Set();
+  const visit = (key) => {
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    for (const dep of Object.keys(lock[key].dependencies ?? {})) visit(resolveDep(key, dep));
+  };
+  for (const name of Object.keys(pkg.dependencies)) if (!['tsx', 'cross-env'].includes(name)) visit(`node_modules/${name}`);
+  return [...seen].filter((k) => existsSync(join(root, k))).sort();
+}
+
+async function thirdPartyNotices() {
+  const parts = [
+    '墨笔（Inkwell.exe）包含以下第三方软件和数据，按各自的许可证分发。',
+    `\n${'='.repeat(72)}\nNode.js ${version}（Inkwell.exe 的运行时）\n${'='.repeat(72)}\n${await nodeLicense()}`,
+    `\n${'='.repeat(72)}\nmodels.dev 模型上限数据（server/modelLimits.json）\n${'='.repeat(72)}\n${MIT('2025 models.dev')}`,
+  ];
+  for (const key of shippedPackages()) {
+    const dir = join(root, key);
+    const meta = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+    const files = readdirSync(dir).filter((f) => /^(licen[cs]e|copying|notice|ofl)/i.test(f)).sort();
+    const body = files.length ? files.map((f) => readFileSync(join(dir, f), 'utf8').trim()).join('\n\n') : `License: ${meta.license ?? '未注明'}`;
+    parts.push(`\n${'='.repeat(72)}\n${meta.name}@${meta.version}（${meta.license ?? '未注明'}）\n${'='.repeat(72)}\n${body}\n`);
+  }
+  return parts.join('\n');
+}
+
 const README = `墨笔 · 小说创作工作台（Windows 免安装版）
 
 1. 把 Inkwell.exe 放到一个固定的文件夹，例如 D:\\墨笔\\
@@ -113,6 +187,7 @@ const README = `墨笔 · 小说创作工作台（Windows 免安装版）
 · 以前用 start.bat 版本写的作品：把旧目录里的 data 文件夹复制到 Inkwell.exe 旁边即可
 · 第一次运行时 Windows 可能提示“已保护你的电脑”：点“更多信息”→“仍要运行”
 · 升级：用新版 Inkwell.exe 覆盖旧的即可，data 文件夹不要删
+· 第三方软件许可见 THIRD_PARTY_NOTICES.txt
 `;
 
 // ---------------------------------------------------------------------------
@@ -163,13 +238,16 @@ console.log(`  界面文件 ${Object.keys(assets).length - 1} 个`);
 step(`生成 Windows 版（Node ${version}）`);
 const exe = join(out, 'Inkwell.exe');
 await makeBinary(await windowsNode(), exe, { windows: true });
-writeFileSync(join(out, 'README.txt'), '\ufeff' + README.replace(/\n/g, '\r\n'));
+const crlf = (s) => '\ufeff' + s.replace(/\r?\n/g, '\r\n');
+writeFileSync(join(out, 'README.txt'), crlf(README));
+writeFileSync(join(out, 'THIRD_PARTY_NOTICES.txt'), crlf(await thirdPartyNotices()));
+const zipFiles = [exe, join(out, 'README.txt'), join(out, 'THIRD_PARTY_NOTICES.txt')];
 const zip = join(out, 'Inkwell-win-x64.zip');
 rmSync(zip, { force: true });
 if (process.platform === 'win32') {
-  run('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${exe}','${join(out, 'README.txt')}' -DestinationPath '${zip}' -Force`]);
+  run('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path ${zipFiles.map((f) => `'${f}'`).join(',')} -DestinationPath '${zip}' -Force`]);
 } else {
-  run('zip', ['-9', '-j', '-q', zip, exe, join(out, 'README.txt')]);
+  run('zip', ['-9', '-j', '-q', zip, ...zipFiles]);
 }
 console.log(`  ${relative(root, exe)}\n  ${relative(root, zip)}`);
 
