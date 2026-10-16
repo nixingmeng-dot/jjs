@@ -1,5 +1,5 @@
-import Database from 'better-sqlite3';
 import { mkdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { countWords } from '../shared/text';
@@ -19,7 +19,18 @@ import type {
 } from '../shared/types';
 import { cleanLimits } from './modelLimits';
 
-export type DB = Database.Database;
+interface Statement {
+  run(...params: any[]): { changes: number | bigint; lastInsertRowid: number | bigint };
+  get(...params: any[]): any;
+  all(...params: any[]): any[];
+}
+
+/** Node 内置 SQLite（node:sqlite）用到的部分。不依赖任何原生模块，安装时无需编译 */
+export interface DB {
+  prepare(sql: string): Statement;
+  exec(sql: string): void;
+  close(): void;
+}
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS books (
@@ -189,9 +200,9 @@ function pick(data: Record<string, unknown>, fields: string[]) {
 
 export function openDb(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
-  const db = new Database(file);
-  db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  const db: DB = new DatabaseSync(file);
+  db.exec('PRAGMA journal_mode = WAL');
+  db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
   // 旧版本数据库补列
   const cols = new Set((db.prepare('PRAGMA table_info(providers)').all() as { name: string }[]).map((c) => c.name));
@@ -202,7 +213,26 @@ export function openDb(file: string): DB {
 }
 
 export class Repo {
+  private txDepth = 0;
   constructor(public db: DB) {}
+
+  /** 在事务里执行 fn，出错整体回滚；可以嵌套 */
+  transaction<T>(fn: () => T): T {
+    const sp = `sp${this.txDepth}`;
+    this.db.exec(`SAVEPOINT ${sp}`);
+    this.txDepth++;
+    try {
+      const out = fn();
+      this.db.exec(`RELEASE ${sp}`);
+      return out;
+    } catch (err) {
+      this.db.exec(`ROLLBACK TO ${sp}`);
+      this.db.exec(`RELEASE ${sp}`);
+      throw err;
+    } finally {
+      this.txDepth--;
+    }
+  }
 
   // ---------- books ----------
   listBooks(): BookSummary[] {
@@ -356,7 +386,7 @@ export class Repo {
 
   reorder(name: CollectionName, ids: string[], volumeId?: string) {
     const { table } = COLLECTIONS[name];
-    const tx = this.db.transaction(() => {
+    this.transaction(() => {
       ids.forEach((id, i) => {
         if (name === 'chapters' && volumeId) {
           this.db.prepare(`UPDATE chapters SET sort = ?, volumeId = ? WHERE id = ?`).run(i + 1, volumeId, id);
@@ -365,12 +395,10 @@ export class Repo {
         }
       });
     });
-    tx();
   }
 
   batchInsert(name: CollectionName, bookId: string, items: Record<string, unknown>[]) {
-    const tx = this.db.transaction(() => items.map((it) => this.insert(name, bookId, it)));
-    return tx();
+    return this.transaction(() => items.map((it) => this.insert(name, bookId, it)));
   }
 
   // ---------- chapters ----------
@@ -534,12 +562,11 @@ export class Repo {
     const stmt = this.db.prepare(
       'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
     );
-    const tx = this.db.transaction(() => {
+    this.transaction(() => {
       for (const [k, v] of Object.entries(patch)) {
         if (k in DEFAULT_SETTINGS && v !== undefined) stmt.run(k, JSON.stringify(v));
       }
     });
-    tx();
     return this.getSettings();
   }
 }

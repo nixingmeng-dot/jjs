@@ -62,7 +62,7 @@ type Backup = {
 
 export function importBackup(repo: Repo, data: Backup): Book {
   if (!data || data.format !== BACKUP_FORMAT || !data.book) throw new HttpError(400, '不是有效的作品备份文件');
-  const tx = repo.db.transaction(() => {
+  return repo.transaction(() => {
     const book = repo.createBook(data.book, { withStarter: false });
     const volMap = new Map<string, string>();
     const chapMap = new Map<string, string>();
@@ -93,13 +93,12 @@ export function importBackup(repo: Repo, data: Backup): Book {
     }
     return book;
   });
-  return tx();
 }
 
 export function importText(repo: Repo, title: string, text: string): Book {
   if (!text.trim()) throw new HttpError(400, '文件内容为空');
   const volumes = splitNovelText(text);
-  const tx = repo.db.transaction(() => {
+  return repo.transaction(() => {
     const book = repo.createBook({ title: title.trim() || '导入的作品' }, { withStarter: false });
     for (const v of volumes) {
       const vol = repo.insert('volumes', book.id, { title: v.title });
@@ -114,6 +113,5 @@ export function importText(repo: Repo, title: string, text: string): Book {
     }
     return book;
   });
-  return tx();
 }
 

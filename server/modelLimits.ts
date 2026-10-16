@@ -1,6 +1,6 @@
-import { readFileSync } from 'node:fs';
 import type { LimitSource, ModelLimit, Provider, ResolvedLimit } from '../shared/types';
 import type { LlmMessage } from './llm';
+import bundled from './modelLimits.json';
 
 /** 不知道模型上限时的输出额度：足够推理模型思考 + 写一章；太大的话服务商通常会在报错里给出真实上限，再自动修正 */
 export const FALLBACK_OUTPUT = 32768;
@@ -23,18 +23,8 @@ function variants(id: string): string[] {
   return out;
 }
 
-let library: Record<string, [number, number]> | null = null;
-
-function loadLibrary() {
-  if (!library) {
-    try {
-      library = JSON.parse(readFileSync(new URL('./modelLimits.json', import.meta.url), 'utf8')).models ?? {};
-    } catch {
-      library = {};
-    }
-  }
-  return library!;
-}
+const library = (bundled as unknown as { models?: Record<string, [number, number]> }).models ?? {};
+const loadLibrary = () => library;
 
 /** 内置模型库（models.dev 快照）里的上限 */
 export function libraryLimit(model: string): ModelLimit | undefined {

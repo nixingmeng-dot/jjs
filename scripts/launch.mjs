@@ -9,7 +9,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 process.chdir(root);
 
-const MIN_NODE = 22;
+// 数据库用 Node 内置的 node:sqlite，22.13 起无需额外参数
+const MIN_NODE = [22, 13];
 const MIRROR = 'https://registry.npmmirror.com';
 
 function fail(msg) {
@@ -17,9 +18,11 @@ function fail(msg) {
   process.exit(1);
 }
 
-const major = Number(process.versions.node.split('.')[0]);
-if (major < MIN_NODE) {
-  fail(`当前 Node.js 版本是 ${process.versions.node}，墨笔需要 ${MIN_NODE} 或更高版本。\n    请到 https://nodejs.org/zh-cn/download 下载安装最新的 LTS 版本后重试。`);
+const [major, minor] = process.versions.node.split('.').map(Number);
+if (major < MIN_NODE[0] || (major === MIN_NODE[0] && minor < MIN_NODE[1])) {
+  fail(
+    `当前 Node.js 版本是 ${process.versions.node}，墨笔需要 ${MIN_NODE.join('.')} 或更高版本。\n    请到 https://nodejs.org/zh-cn/download 下载安装最新的 LTS 版本后重试；\n    或者直接下载 Windows 免安装版（Inkwell.exe），不需要安装 Node.js。`,
+  );
 }
 
 function hashFiles(paths) {
@@ -97,4 +100,6 @@ process.env.NODE_ENV = 'production';
 process.env.INKWELL_OPEN ??= '1';
 const { register } = await import('tsx/esm/api');
 register();
+// ESM 会在执行任何代码之前先加载 node:sqlite，所以警告过滤要在导入服务端之前装好
+await import(pathToFileURL(join(root, 'server', 'quiet.ts')).href);
 await import(pathToFileURL(join(root, 'server', 'index.ts')).href);

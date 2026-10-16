@@ -8,7 +8,7 @@ import { estimateTokens, libraryLimit, limitFromModelInfo, normalizeModelId, par
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import Database from 'better-sqlite3';
+import { DatabaseSync } from 'node:sqlite';
 import type { AiStreamEvent, BookTree, Chapter } from '../shared/types';
 
 let app: ReturnType<typeof createApp>;
@@ -76,6 +76,30 @@ describe('books, volumes, chapters', () => {
     await call('POST', `/books/${book.id}/chapters/reorder`, { ids: [created[1].id], volumeId: v2.id });
     const { data: after } = await call<BookTree>('GET', `/books/${book.id}`);
     expect(after.chapters.find((c) => c.id === created[1].id)?.volumeId).toBe(v2.id);
+  });
+
+  it('rolls back failed transactions, including nested ones', () => {
+    const before = repo.listBooks().length;
+    expect(() =>
+      repo.transaction(() => {
+        repo.createBook({ title: '半截' });
+        throw new Error('boom');
+      }),
+    ).toThrow('boom');
+    expect(repo.listBooks()).toHaveLength(before);
+    repo.transaction(() => {
+      repo.createBook({ title: '外层' });
+      try {
+        repo.transaction(() => {
+          repo.createBook({ title: '内层' });
+          throw new Error('inner');
+        });
+      } catch {
+        /* 内层回滚，外层继续 */
+      }
+    });
+    expect(repo.listBooks().map((b) => b.title)).toEqual(expect.arrayContaining(['外层']));
+    expect(repo.listBooks().map((b) => b.title)).not.toContain('内层');
   });
 
   it('cascades deletes', async () => {
@@ -474,7 +498,7 @@ describe('model limits', () => {
   it('adds limit columns to an old database', () => {
     const dir = mkdtempSync(join(tmpdir(), 'inkwell-'));
     const file = join(dir, 'old.db');
-    const old = new Database(file);
+    const old = new DatabaseSync(file);
     old.exec(`CREATE TABLE providers (id TEXT PRIMARY KEY, name TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL DEFAULT 'openai', baseUrl TEXT NOT NULL DEFAULT '',
       apiKey TEXT NOT NULL DEFAULT '', models TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, sort REAL NOT NULL DEFAULT 0, createdAt INTEGER NOT NULL);
       INSERT INTO providers (id, name, createdAt) VALUES ('p1', '旧服务商', 1);`);

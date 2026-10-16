@@ -10,7 +10,8 @@
     "isolatedModules": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "types": ["node"]
+    "types": ["node"],
+    "resolveJsonModule": true
   },
   "include": ["server", "shared", "tests", "scripts", "vite.config.ts", "vitest.config.ts"]
 }

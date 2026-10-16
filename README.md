@@ -4,9 +4,19 @@
 
 所有数据（作品、API Key）都只保存在本机的 `data/inkwell.db`（SQLite）里。
 
-## Windows 一键使用（例如装到 D 盘）
+## Windows 免安装版（推荐）
 
-1. 安装 [Node.js](https://nodejs.org/zh-cn/download)（LTS 版本，22 或更高），一路“下一步”即可。
+1. 到 [Releases](https://github.com/nixingmeng-dot/jjs/releases) 下载 `Inkwell-win-x64.zip`。
+2. 解压，把 `Inkwell.exe` 放到一个固定的文件夹，例如 `D:\墨笔\`。
+3. 双击 `Inkwell.exe`，浏览器会自动打开。使用期间保持黑色窗口开着，关掉窗口就退出了。
+
+不需要安装 Node.js，也不需要 npm 或任何微软 C++ 组件。作品和 API Key 保存在 `Inkwell.exe` 旁边的 `data` 文件夹里，备份就是复制这个文件夹；升级时用新的 `Inkwell.exe` 覆盖旧的即可。以前用 `start.bat` 写的作品，把旧目录里的 `data` 文件夹复制过来就能继续用。第一次运行时 Windows 可能提示“已保护你的电脑”，点“更多信息”→“仍要运行”。
+
+免安装版由 `npm run build:exe` 生成（Node.js 单可执行文件：把服务端和界面打进同版本的官方 `node.exe`，可以在任何系统上构建）；`.github/workflows/windows-exe.yml` 会在 Windows 上构建并实际启动测试。
+
+## 从源码运行（例如装到 D 盘）
+
+1. 安装 [Node.js](https://nodejs.org/zh-cn/download)（LTS 版本，22.13 或更高），一路“下一步”即可。
 2. 下载本项目的 ZIP，解压到你想放的位置，例如 `D:\inkwell`（路径里最好不要有空格）。
 3. 双击文件夹里的 **`start.bat`**。
 
@@ -19,7 +29,7 @@
 
 ## 快速开始（开发者）
 
-需要 Node.js 22 或更高版本。
+需要 Node.js 22.13 或更高版本（数据库用的是 Node 内置的 `node:sqlite`，没有需要编译的原生依赖）。
 
 ```bash
 npm install
@@ -97,7 +107,7 @@ AI 每次调用都会自动组装上下文：作品信息、文风设定与样�
 ## 项目结构
 
 ```
-server/      Hono + better-sqlite3 后端：数据存储、导入导出、提示词组装、各家模型的流式调用
+server/      Hono + node:sqlite 后端：数据存储、导入导出、提示词组装、各家模型的流式调用
 shared/      前后端共用：类型、中文文本工具、去 AI 味检测器、服务商预设
 src/         React + Tailwind 前端
 tests/       Vitest 测试（npm test）
