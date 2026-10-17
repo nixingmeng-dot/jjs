@@ -82,8 +82,11 @@ export function importBackup(repo: Repo, data: Backup): Book {
       const nc = repo.insert('chapters', book.id, { ...c, volumeId, sort: chapterCount[volumeId] });
       chapMap.set(String(c.id), nc.id as string);
     }
-    for (const ch of data.characters ?? []) repo.insert('characters', book.id, ch);
-    for (const w of data.world ?? []) repo.insert('world', book.id, w);
+    // 记忆里的章节 ID 换成新导入的章节
+    const remap = (facts: unknown) =>
+      Array.isArray(facts) ? facts.map((f) => ({ ...f, chapterId: chapMap.get(String(f?.chapterId)) ?? '' })) : undefined;
+    for (const ch of data.characters ?? []) repo.insert('characters', book.id, { ...ch, facts: remap(ch.facts) });
+    for (const w of data.world ?? []) repo.insert('world', book.id, { ...w, facts: remap(w.facts) });
     for (const f of data.foreshadows ?? []) {
       repo.insert('foreshadows', book.id, {
         ...f,

@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
-import type { AiRequest, AiStreamEvent, AppSettings, CollectionName, Provider, ResolvedLimit } from '../shared/types';
+import type { AiRequest, AiStreamEvent, AppSettings, CollectionName, Provider, ResolvedLimit, Volume } from '../shared/types';
 import { COLLECTIONS, HttpError, type Repo } from './db';
 import { listModels, streamChat } from './llm';
 import { estimateTokens, planMaxTokens, resolveLimit } from './modelLimits';
-import { buildPrompt } from './prompts';
+import { buildPrompt, parseMemory } from './prompts';
 import { exportBook, importBackup, importText } from './transfer';
 
 const MASK = '••••';
@@ -243,6 +243,86 @@ export function createApp(repo: Repo, opts: { localOnly?: boolean } = {}) {
     return { settings, provider, model };
   };
 
+  // ---------- 故事记忆 ----------
+  /** 后台整理用：不流式返回，只收集正文 */
+  const collect = async (req: AiRequest) => {
+    const { settings, provider, model } = resolveModel(req);
+    const limit = resolveLimit(provider, model);
+    const built = buildPrompt(repo, req, settings, { contextTokens: limit.context });
+    const signal = AbortSignal.timeout(240_000);
+    let text = '';
+    try {
+      for await (const chunk of streamChat({
+        provider,
+        model,
+        messages: built.messages,
+        temperature: built.temperature,
+        maxTokens: planMaxTokens({ limit, override: settings.maxTokens, promptTokens: estimateTokens(built.messages) }),
+        onLearn: (l) => repo.mergeDetectedLimits(provider.id, { [model]: l }),
+        signal,
+      })) {
+        if (chunk.type === 'text') text += chunk.text;
+      }
+    } catch (err) {
+      if (signal.aborted) throw new HttpError(504, '整理超时（4 分钟无结果），请稍后重试');
+      throw err;
+    }
+    return text;
+  };
+  // 同一章 / 同一卷同时只整理一次
+  const inflight = new Map<string, Promise<unknown>>();
+  const once = <T,>(key: string, fn: () => Promise<T>): Promise<T> => {
+    const running = inflight.get(key);
+    if (running) return running as Promise<T>;
+    const p = fn().finally(() => inflight.delete(key));
+    inflight.set(key, p);
+    return p;
+  };
+
+  api.get('/books/:id/memory', (c) => {
+    const id = c.req.param('id');
+    mustBook(id);
+    return c.json({ status: repo.memoryStatus(id), updates: repo.listMemoryUpdates(id) });
+  });
+  api.post('/chapters/:id/memorize', async (c) => {
+    const id = c.req.param('id');
+    const ch = repo.getChapter(id);
+    if (!ch) throw new HttpError(404, '章节不存在');
+    const result = await once(`chapter:${id}`, async () => {
+      const parsed = parseMemory(await collect({ task: 'memorize', bookId: ch.bookId, chapterId: id }));
+      if (!parsed.summary) throw new HttpError(502, '模型没有返回可用的摘要，请重试或换一个模型');
+      repo.update('chapters', id, { summary: parsed.summary });
+      const updates = repo.replaceMemoryUpdates(ch.bookId, id, parsed.updates);
+      return { chapter: repo.getEntity('chapters', id), updates };
+    });
+    return c.json(result);
+  });
+  api.post('/volumes/:id/recap', async (c) => {
+    const id = c.req.param('id');
+    const vol = repo.getEntity('volumes', id) as unknown as Volume | undefined;
+    if (!vol) throw new HttpError(404, '分卷不存在');
+    const result = await once(`volume:${id}`, async () => {
+      const recap = (await collect({ task: 'volume_recap', bookId: vol.bookId, volumeId: id })).trim().slice(0, 1500);
+      if (!recap) throw new HttpError(502, '模型没有返回卷回顾，请重试');
+      return repo.setVolumeRecap(id, recap);
+    });
+    return c.json(result);
+  });
+  api.post('/books/:id/memory-updates/apply', async (c) => {
+    const id = c.req.param('id');
+    const { items } = await body<{ items?: { id: string; name?: string; fact?: string }[] }>(c);
+    if (!Array.isArray(items)) throw new HttpError(400, 'items 必须是数组');
+    const applied = repo.applyMemoryUpdates(id, items);
+    return c.json({ applied, updates: repo.listMemoryUpdates(id) });
+  });
+  api.post('/books/:id/memory-updates/dismiss', async (c) => {
+    const id = c.req.param('id');
+    const { ids } = await body<{ ids?: string[] }>(c);
+    if (!Array.isArray(ids)) throw new HttpError(400, 'ids 必须是数组');
+    repo.dismissMemoryUpdates(id, ids);
+    return c.json({ updates: repo.listMemoryUpdates(id) });
+  });
+
   api.post('/ai/preview', async (c) => {
     const req = await body<AiRequest>(c);
     const settings = repo.getSettings();
@@ -253,7 +333,8 @@ export function createApp(repo: Repo, opts: { localOnly?: boolean } = {}) {
     const req = await body<AiRequest>(c);
     if (!req.bookId) throw new HttpError(400, '缺少 bookId');
     const { settings, provider, model } = resolveModel(req);
-    const built = buildPrompt(repo, req, settings);
+    const limit = resolveLimit(provider, model);
+    const built = buildPrompt(repo, req, settings, { contextTokens: limit.context });
     const controller = new AbortController();
     c.req.raw.signal?.addEventListener('abort', () => controller.abort());
     const enc = new TextEncoder();
@@ -274,7 +355,7 @@ export function createApp(repo: Repo, opts: { localOnly?: boolean } = {}) {
             messages: built.messages,
             temperature: req.temperature ?? built.temperature,
             maxTokens: planMaxTokens({
-              limit: resolveLimit(provider, model),
+              limit,
               override: req.maxTokens ?? settings.maxTokens,
               promptTokens: estimateTokens(built.messages),
             }),

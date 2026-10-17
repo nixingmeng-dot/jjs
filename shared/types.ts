@@ -42,6 +42,10 @@ export interface Volume {
   title: string;
   /** 卷纲 */
   summary: string;
+  /** 自动生成的卷回顾（写完的分卷压缩成一段，供后面的章节参考） */
+  recap: string;
+  /** 生成卷回顾时各章摘要的指纹，摘要变了就重新生成 */
+  recapHash: string;
   sort: number;
 }
 
@@ -54,6 +58,8 @@ export interface ChapterMeta {
   outline: string;
   /** 章节摘要（供 AI 作为前情提要） */
   summary: string;
+  /** 写入摘要时的正文字数，用来判断摘要是否过期 */
+  summaryWords: number;
   notes: string;
   status: ChapterStatus;
   sort: number;
@@ -85,6 +91,8 @@ export interface Character {
   notes: string;
   /** 1 = 始终放入 AI 上下文 */
   pinned: number;
+  /** 经历与变化（自动记忆整理，或手动添加） */
+  facts: MemoryFact[];
   sort: number;
 }
 
@@ -95,7 +103,35 @@ export interface WorldEntry {
   name: string;
   content: string;
   pinned: number;
+  facts: MemoryFact[];
   sort: number;
+}
+
+/** 一条记忆：在哪一章发生了什么（chapterId 为空表示手动添加） */
+export interface MemoryFact {
+  chapterId: string;
+  text: string;
+}
+
+/** 自动记忆从章节里整理出的变化，作者确认后才写入人物卡、设定和伏笔 */
+export interface MemoryUpdate {
+  id: string;
+  bookId: string;
+  chapterId: string;
+  kind: 'character' | 'world' | 'foreshadow';
+  name: string;
+  fact: string;
+  category: string;
+  /** 伏笔：本章已回收 */
+  resolved: number;
+  createdAt: number;
+}
+
+export interface MemoryStatus {
+  /** 需要生成或更新摘要的章节 */
+  chapters: string[];
+  /** 需要生成卷回顾的分卷 */
+  volumes: string[];
 }
 
 export interface Foreshadow {
@@ -194,6 +230,8 @@ export interface AppSettings {
   editorWidth: number;
   /** 正文字体：系统黑体 / 内置思源宋体 / 内置霞鹜文楷 */
   editorFont: 'sans' | 'serif' | 'kai';
+  /** 自动记忆：离开章节或标为完成时自动生成摘要、整理人物和设定变化 */
+  autoMemory: boolean;
   theme: 'light' | 'dark' | 'sepia';
 }
 
@@ -211,7 +249,9 @@ export type AiTask =
   | 'character'
   | 'world'
   | 'brainstorm'
-  | 'chat';
+  | 'chat'
+  | 'memorize'
+  | 'volume_recap';
 
 export type RewriteMode =
   | 'polish'

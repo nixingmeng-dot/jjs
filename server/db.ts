@@ -1,7 +1,8 @@
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { dirname } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { MEMORY_MIN_WORDS, summaryState } from '../shared/memory';
 import { countWords } from '../shared/text';
 import type {
   AppSettings,
@@ -12,10 +13,14 @@ import type {
   Chapter,
   ChapterMeta,
   CollectionName,
+  MemoryFact,
+  MemoryStatus,
+  MemoryUpdate,
   ModelLimit,
   Provider,
   SearchHit,
   Snapshot,
+  Volume,
 } from '../shared/types';
 import { cleanLimits } from './modelLimits';
 
@@ -55,7 +60,9 @@ CREATE TABLE IF NOT EXISTS volumes (
   bookId TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
   title TEXT NOT NULL DEFAULT '',
   summary TEXT NOT NULL DEFAULT '',
-  sort REAL NOT NULL DEFAULT 0
+  sort REAL NOT NULL DEFAULT 0,
+  recap TEXT NOT NULL DEFAULT '',
+  recapHash TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS chapters (
   id TEXT PRIMARY KEY,
@@ -70,7 +77,8 @@ CREATE TABLE IF NOT EXISTS chapters (
   sort REAL NOT NULL DEFAULT 0,
   wordCount INTEGER NOT NULL DEFAULT 0,
   createdAt INTEGER NOT NULL,
-  updatedAt INTEGER NOT NULL
+  updatedAt INTEGER NOT NULL,
+  summaryWords INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS characters (
   id TEXT PRIMARY KEY,
@@ -89,7 +97,8 @@ CREATE TABLE IF NOT EXISTS characters (
   relations TEXT NOT NULL DEFAULT '',
   notes TEXT NOT NULL DEFAULT '',
   pinned INTEGER NOT NULL DEFAULT 0,
-  sort REAL NOT NULL DEFAULT 0
+  sort REAL NOT NULL DEFAULT 0,
+  facts TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS world_entries (
   id TEXT PRIMARY KEY,
@@ -98,7 +107,8 @@ CREATE TABLE IF NOT EXISTS world_entries (
   name TEXT NOT NULL DEFAULT '',
   content TEXT NOT NULL DEFAULT '',
   pinned INTEGER NOT NULL DEFAULT 0,
-  sort REAL NOT NULL DEFAULT 0
+  sort REAL NOT NULL DEFAULT 0,
+  facts TEXT NOT NULL DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS foreshadows (
   id TEXT PRIMARY KEY,
@@ -134,6 +144,17 @@ CREATE TABLE IF NOT EXISTS providers (
   limitOverrides TEXT NOT NULL DEFAULT '{}'
 );
 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memory_updates (
+  id TEXT PRIMARY KEY,
+  bookId TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  chapterId TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  fact TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT '',
+  resolved INTEGER NOT NULL DEFAULT 0,
+  createdAt INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS daily_stats (
   bookId TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
   day TEXT NOT NULL,
@@ -145,7 +166,7 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_chapter ON snapshots(chapterId, created
 `;
 
 export const COLLECTIONS: Record<CollectionName, { table: string; fields: string[] }> = {
-  volumes: { table: 'volumes', fields: ['title', 'summary', 'sort'] },
+  volumes: { table: 'volumes', fields: ['title', 'summary', 'recap', 'sort'] },
   chapters: {
     table: 'chapters',
     fields: ['volumeId', 'title', 'outline', 'content', 'summary', 'notes', 'status', 'sort'],
@@ -154,10 +175,10 @@ export const COLLECTIONS: Record<CollectionName, { table: string; fields: string
     table: 'characters',
     fields: [
       'name', 'aliases', 'role', 'gender', 'age', 'appearance', 'personality', 'background',
-      'speech', 'motivation', 'arc', 'relations', 'notes', 'pinned', 'sort',
+      'speech', 'motivation', 'arc', 'relations', 'notes', 'pinned', 'facts', 'sort',
     ],
   },
-  world: { table: 'world_entries', fields: ['category', 'name', 'content', 'pinned', 'sort'] },
+  world: { table: 'world_entries', fields: ['category', 'name', 'content', 'pinned', 'facts', 'sort'] },
   foreshadows: {
     table: 'foreshadows',
     fields: ['title', 'content', 'plantedChapterId', 'resolvePlan', 'resolvedChapterId', 'status', 'sort'],
@@ -179,6 +200,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   editorFontSize: 18,
   editorWidth: 760,
   editorFont: 'sans',
+  autoMemory: true,
   theme: 'light',
 };
 
@@ -193,10 +215,27 @@ function pick(data: Record<string, unknown>, fields: string[]) {
   for (const f of fields) {
     const v = data[f];
     if (v === undefined) continue;
-    out[f] = typeof v === 'boolean' ? Number(v) : v;
+    if (f === 'facts') out[f] = JSON.stringify(cleanFacts(typeof v === 'string' ? parseJson(v, []) : v));
+    else out[f] = typeof v === 'boolean' ? Number(v) : v;
   }
   return out;
 }
+
+export function cleanFacts(v: unknown): MemoryFact[] {
+  if (!Array.isArray(v)) return [];
+  return v
+    .map((f) => ({ chapterId: String(f?.chapterId ?? ''), text: String(f?.text ?? '').trim() }))
+    .filter((f) => f.text)
+    .slice(-200);
+}
+
+/** 读出来的行里 facts 是 JSON 文本，转成数组 */
+function withFacts<T extends Record<string, unknown>>(row: T): T {
+  if (row && typeof row.facts === 'string') (row as Record<string, unknown>).facts = cleanFacts(parseJson(row.facts, []));
+  return row;
+}
+
+const CHAPTER_META_COLS = 'id, bookId, volumeId, title, outline, summary, summaryWords, notes, status, sort, wordCount, createdAt, updatedAt';
 
 export function openDb(file: string): DB {
   if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
@@ -205,10 +244,24 @@ export function openDb(file: string): DB {
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(SCHEMA);
   // 旧版本数据库补列
-  const cols = new Set((db.prepare('PRAGMA table_info(providers)').all() as { name: string }[]).map((c) => c.name));
-  for (const col of ['detectedLimits', 'limitOverrides']) {
-    if (!cols.has(col)) db.exec(`ALTER TABLE providers ADD COLUMN ${col} TEXT NOT NULL DEFAULT '{}'`);
+  const added = new Set<string>();
+  for (const [table, col, def] of [
+    ['providers', 'detectedLimits', "TEXT NOT NULL DEFAULT '{}'"],
+    ['providers', 'limitOverrides', "TEXT NOT NULL DEFAULT '{}'"],
+    ['chapters', 'summaryWords', 'INTEGER NOT NULL DEFAULT 0'],
+    ['volumes', 'recap', "TEXT NOT NULL DEFAULT ''"],
+    ['volumes', 'recapHash', "TEXT NOT NULL DEFAULT ''"],
+    ['characters', 'facts', "TEXT NOT NULL DEFAULT '[]'"],
+    ['world_entries', 'facts', "TEXT NOT NULL DEFAULT '[]'"],
+  ]) {
+    const cols = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map((c) => c.name));
+    if (!cols.has(col)) {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${def}`);
+      added.add(`${table}.${col}`);
+    }
   }
+  // 以前写好的摘要视为与当时的正文一致，不当作过期
+  if (added.has('chapters.summaryWords')) db.exec("UPDATE chapters SET summaryWords = wordCount WHERE summary != ''");
   return db;
 }
 
@@ -295,19 +348,16 @@ export class Repo {
     return {
       book,
       volumes: all('SELECT * FROM volumes WHERE bookId = ? ORDER BY sort, rowid'),
-      chapters: all(
-        `SELECT id, bookId, volumeId, title, outline, summary, notes, status, sort, wordCount, createdAt, updatedAt
-         FROM chapters WHERE bookId = ? ORDER BY sort, rowid`,
-      ),
-      characters: all('SELECT * FROM characters WHERE bookId = ? ORDER BY sort, rowid'),
-      world: all('SELECT * FROM world_entries WHERE bookId = ? ORDER BY sort, rowid'),
+      chapters: all(`SELECT ${CHAPTER_META_COLS} FROM chapters WHERE bookId = ? ORDER BY sort, rowid`),
+      characters: (all('SELECT * FROM characters WHERE bookId = ? ORDER BY sort, rowid') as Record<string, unknown>[]).map(withFacts) as never[],
+      world: (all('SELECT * FROM world_entries WHERE bookId = ? ORDER BY sort, rowid') as Record<string, unknown>[]).map(withFacts) as never[],
       foreshadows: all('SELECT * FROM foreshadows WHERE bookId = ? ORDER BY sort, rowid'),
     };
   }
 
   /** 按阅读顺序（卷序 → 章序）排列的章节 */
   orderedChapters(bookId: string, withContent = false): (ChapterMeta & { content?: string })[] {
-    const cols = withContent ? 'c.*' : 'c.id, c.bookId, c.volumeId, c.title, c.outline, c.summary, c.notes, c.status, c.sort, c.wordCount, c.createdAt, c.updatedAt';
+    const cols = withContent ? 'c.*' : CHAPTER_META_COLS.split(', ').map((c) => 'c.' + c).join(', ');
     return this.db
       .prepare(
         `SELECT ${cols} FROM chapters c JOIN volumes v ON v.id = c.volumeId
@@ -331,6 +381,7 @@ export class Repo {
       if (!row.volumeId) throw new HttpError(400, '缺少 volumeId');
       const content = String(row.content ?? '');
       row.wordCount = countWords(content);
+      if (typeof row.summary === 'string' && row.summary.trim()) row.summaryWords = row.wordCount;
       const now = Date.now();
       row.createdAt = now;
       row.updatedAt = now;
@@ -351,7 +402,7 @@ export class Repo {
     const { table } = COLLECTIONS[name];
     const row = this.db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) as Record<string, unknown> | undefined;
     if (row && name === 'chapters') delete row.content;
-    return row;
+    return row && withFacts(row);
   }
 
   update(name: CollectionName, id: string, data: Record<string, unknown>) {
@@ -368,6 +419,8 @@ export class Repo {
         if (delta > 0) this.addDailyWords(String(existing.bookId), delta);
         this.maybeAutoSnapshot(id, String(existing.content ?? ''));
       }
+      // 写入摘要（AI 生成或手动修改）即视为与当前正文一致
+      if (typeof row.summary === 'string') row.summaryWords = row.wordCount ?? existing.wordCount;
     }
     if (Object.keys(row).length) {
       const sets = Object.keys(row).map((c) => `${c} = @${c}`);
@@ -527,6 +580,105 @@ export class Repo {
       .prepare(`INSERT INTO providers (id, ${cols.join(', ')}, createdAt) VALUES (@id, ${cols.map((c) => '@' + c).join(', ')}, @now)`)
       .run({ id, ...row, now: Date.now() });
     return this.getProvider(id)!;
+  }
+
+  // ---------- memory ----------
+  /** 哪些章节需要（重新）生成摘要、哪些写完的分卷需要卷回顾 */
+  memoryStatus(bookId: string): MemoryStatus {
+    const chapters = this.orderedChapters(bookId);
+    const volumes = this.db.prepare('SELECT * FROM volumes WHERE bookId = ? ORDER BY sort, rowid').all(bookId) as unknown as Volume[];
+    const need = chapters.filter((c) => ['missing', 'stale'].includes(summaryState(c))).map((c) => c.id);
+    const written = (v: Volume) => chapters.filter((c) => c.volumeId === v.id && c.wordCount >= MEMORY_MIN_WORDS);
+    const volumeIds = volumes
+      .filter((v, i) => {
+        const ws = written(v);
+        if (!ws.length || ws.some((c) => summaryState(c) !== 'fresh')) return false;
+        // 后面的分卷已经开写，这一卷才算写完
+        if (!volumes.slice(i + 1).some((later) => written(later).length)) return false;
+        return !v.recap.trim() || v.recapHash !== this.volumeRecapHash(v.id);
+      })
+      .map((v) => v.id);
+    return { chapters: need, volumes: volumeIds };
+  }
+
+  volumeRecapHash(volumeId: string) {
+    const rows = this.db
+      .prepare('SELECT summary FROM chapters WHERE volumeId = ? AND wordCount >= ? ORDER BY sort, rowid')
+      .all(volumeId, MEMORY_MIN_WORDS) as { summary: string }[];
+    return createHash('sha1').update(rows.map((r) => r.summary.trim()).join('\n')).digest('hex').slice(0, 16);
+  }
+
+  setVolumeRecap(volumeId: string, recap: string) {
+    this.db.prepare('UPDATE volumes SET recap = ?, recapHash = ? WHERE id = ?').run(recap, this.volumeRecapHash(volumeId), volumeId);
+    return this.getEntity('volumes', volumeId) as unknown as Volume;
+  }
+
+  listMemoryUpdates(bookId: string): MemoryUpdate[] {
+    return this.db.prepare('SELECT * FROM memory_updates WHERE bookId = ? ORDER BY createdAt, rowid').all(bookId) as unknown as MemoryUpdate[];
+  }
+
+  /** 一章重新整理后，替换它之前未确认的变化 */
+  replaceMemoryUpdates(bookId: string, chapterId: string, items: Pick<MemoryUpdate, 'kind' | 'name' | 'fact' | 'category' | 'resolved'>[]) {
+    this.transaction(() => {
+      this.db.prepare('DELETE FROM memory_updates WHERE chapterId = ?').run(chapterId);
+      const stmt = this.db.prepare(
+        'INSERT INTO memory_updates (id, bookId, chapterId, kind, name, fact, category, resolved, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      );
+      const now = Date.now();
+      for (const u of items) stmt.run(newId(), bookId, chapterId, u.kind, u.name, u.fact, u.category, u.resolved ? 1 : 0, now);
+    });
+    return this.listMemoryUpdates(bookId).filter((u) => u.chapterId === chapterId);
+  }
+
+  dismissMemoryUpdates(bookId: string, ids: string[]) {
+    const stmt = this.db.prepare('DELETE FROM memory_updates WHERE id = ? AND bookId = ?');
+    this.transaction(() => ids.forEach((id) => stmt.run(id, bookId)));
+  }
+
+  /** 把作者确认的变化写进人物卡、设定和伏笔（确认时可以改名字和内容） */
+  applyMemoryUpdates(bookId: string, items: { id: string; name?: string; fact?: string }[]) {
+    type Row = { id: string; name: string; aliases?: string; facts: MemoryFact[] };
+    const rows = (sql: string) => (this.db.prepare(sql).all(bookId) as Record<string, unknown>[]).map(withFacts) as unknown as Row[];
+    return this.transaction(() => {
+      let applied = 0;
+      for (const item of items) {
+        const u = this.db.prepare('SELECT * FROM memory_updates WHERE id = ? AND bookId = ?').get(item.id, bookId) as MemoryUpdate | undefined;
+        if (!u) continue;
+        this.db.prepare('DELETE FROM memory_updates WHERE id = ?').run(u.id);
+        const name = String(item.name ?? u.name).trim();
+        const fact = String(item.fact ?? u.fact).trim();
+        if (!name || !fact) continue;
+        const entry = { chapterId: u.chapterId, text: fact };
+        const append = (collection: CollectionName, row: Row) => {
+          if (!row.facts.some((f) => f.chapterId === entry.chapterId && f.text === entry.text)) this.update(collection, row.id, { facts: [...row.facts, entry] });
+        };
+        if (u.kind === 'character') {
+          const hit = rows('SELECT * FROM characters WHERE bookId = ?').find(
+            (c) => c.name.trim() === name || (c.aliases ?? '').split(/[,，、\s/]+/).some((a) => a.trim() === name),
+          );
+          if (hit) append('characters', hit);
+          else this.insert('characters', bookId, { name, role: '配角', facts: [entry] });
+        } else if (u.kind === 'world') {
+          const hit = rows('SELECT * FROM world_entries WHERE bookId = ?').find((w) => w.name.trim() === name);
+          if (hit) append('world', hit);
+          else this.insert('world', bookId, { name, category: u.category || '其他', content: fact });
+        } else {
+          const open = this.db.prepare("SELECT * FROM foreshadows WHERE bookId = ? AND status = 'open'").all(bookId) as { id: string; title: string; content: string }[];
+          const same = (t: string) => t.trim() === name || (t.trim().length >= 2 && name.length >= 2 && (t.includes(name) || name.includes(t.trim())));
+          const hit = open.find((f) => same(f.title));
+          if (u.resolved) {
+            if (!hit) continue;
+            this.update('foreshadows', hit.id, { status: 'resolved', resolvedChapterId: u.chapterId });
+          } else if (hit) {
+            this.update('foreshadows', hit.id, { content: [hit.content.trim(), fact].filter(Boolean).join('\n') });
+          } else {
+            this.insert('foreshadows', bookId, { title: name, content: fact, plantedChapterId: u.chapterId, status: 'open' });
+          }
+        }
+        applied++;
+      }
+      return applied;
+    });
   }
 
   /** 合并自动识别到的模型上限（服务商接口返回或从报错得知） */
