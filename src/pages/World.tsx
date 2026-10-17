@@ -4,6 +4,7 @@ import { useNavigate, useParams } from 'react-router';
 import type { WorldEntry } from '../../shared/types';
 import { AiResultView, ModelPicker } from '../components/ai';
 import { Button, confirmAsk, cx, Empty, Field, IconButton, Input, Textarea } from '../components/ui';
+import { FactsField } from '../components/FactsField';
 import { useAiTask } from '../hooks/useAiTask';
 import { toastError, useBook } from '../store';
 import { PageHeader } from './BookLayout';
@@ -119,6 +120,7 @@ export default function WorldPage() {
               <Field label="内容" hint="写清规则、限制和代价，比写“很强大”有用得多">
                 <Textarea value={current.content} onChange={(e) => update('world', current.id, { content: e.target.value })} minRows={10} className="leading-loose" />
               </Field>
+              <FactsField facts={current.facts ?? []} onChange={(facts) => update('world', current.id, { facts }, true)} />
               <div className="flex gap-2">
                 <Input value={instruction} onChange={(e) => setInstruction(e.target.value)} placeholder="对 AI 的要求（可选）" className="flex-1" />
                 <Button

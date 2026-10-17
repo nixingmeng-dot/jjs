@@ -7,6 +7,7 @@ import { AiResultView, ModelPicker } from '../components/ai';
 import { Badge, Button, confirmAsk, cx, Empty, Field, IconButton, Input, Modal, Textarea } from '../components/ui';
 import { useAiTask } from '../hooks/useAiTask';
 import { toast, toastError, useBook } from '../store';
+import { FactsField } from '../components/FactsField';
 import { PageHeader } from './BookLayout';
 
 const ROLES = ['主角', '女主', '男主', '配角', '反派', '导师', '路人'];
@@ -165,6 +166,7 @@ export default function CharactersPage() {
                   />
                 </Field>
               ))}
+              <FactsField facts={current.facts ?? []} onChange={(facts) => update('characters', current.id, { facts }, true)} />
             </div>
           ) : (
             <Empty icon={<Users className="size-8" />} title="新建一个人物">

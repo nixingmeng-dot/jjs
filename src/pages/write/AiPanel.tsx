@@ -1,4 +1,4 @@
-import { ArrowRight, FileText, Lightbulb, ListTree, MessageSquare, ScanSearch, ScrollText, Send, Sparkles, Trash, WandSparkles, X } from 'lucide-react';
+import { ArrowRight, Brain, FileText, Lightbulb, ListTree, MessageSquare, ScanSearch, Send, Sparkles, Trash, WandSparkles, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { analyzeAiFlavor, type FlavorHit, type FlavorReport } from '../../../shared/antiAi';
 import type { ChapterMeta, ChatTurn } from '../../../shared/types';
@@ -9,6 +9,7 @@ import { useAiTask, type AiTaskHandle } from '../../hooks/useAiTask';
 import { toast, useBook } from '../../store';
 import type { EditorHandle } from './editorParts';
 import { IDEAS, REWRITES, type WriteAssist } from './useWriteAssist';
+import { memorizeNow, useMemory } from '../../memory';
 
 export interface ChatState {
   task: AiTaskHandle;
@@ -60,6 +61,7 @@ export function AiPanel({
   const bookId = useBook((s) => s.tree!.book.id);
   const review = useAiTask();
   const { task, target: t } = assist;
+  const memorizing = useMemory((s) => s.running?.id === meta.id || s.queue.some((j) => j.id === meta.id));
 
   const selText = content.slice(selection.start, selection.end);
   const hasSel = selText.trim().length > 0;
@@ -176,11 +178,11 @@ export function AiPanel({
               />
               <ActionRow icon={<ListTree className="size-4" />} label="生成本章细纲" disabled={task.running} onClick={() => run(() => assist.genField('outline'))} />
               <ActionRow
-                icon={<ScrollText className="size-4" />}
-                label="生成本章摘要"
-                hint="供后续章节参考"
-                disabled={task.running || !content.trim()}
-                onClick={() => run(() => assist.genField('summary'))}
+                icon={<Brain className="size-4" />}
+                label={memorizing ? '正在整理本章记忆…' : '更新本章记忆'}
+                hint="摘要 + 人物 / 设定变化"
+                disabled={memorizing || !content.trim()}
+                onClick={() => memorizeNow(meta.bookId, meta.id)}
               />
             </Group>
 

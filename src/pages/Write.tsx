@@ -37,6 +37,8 @@ import { toast, toastError, useApp, useBook, useUi } from '../store';
 import { AiPanel, LenSelect, type ChatState } from './write/AiPanel';
 import { caretCoords, execReplace, FindBar, scrollToPos, SnapshotsModal, type EditorHandle } from './write/editorParts';
 import { REWRITES, useWriteAssist, type WriteAssist } from './write/useWriteAssist';
+import { summaryState } from '../../shared/memory';
+import { memorizeNow, memoryOnLeaveChapter, setActiveChapter, useMemory } from '../memory';
 
 export default function WritePage() {
   const { bookId, chapterId } = useParams();
@@ -296,6 +298,15 @@ function ChapterWorkspace({ meta, label, volumeTitle, chat }: { meta: ChapterMet
   }, [flush, setFocus, togglePanel]);
 
   useEffect(() => () => setFocus(false), [setFocus]);
+
+  // 自动记忆：正在写的这一章先不整理，离开后再整理
+  useEffect(() => {
+    setActiveChapter(meta.id);
+    return () => {
+      setActiveChapter(undefined);
+      memoryOnLeaveChapter(meta.bookId);
+    };
+  }, [meta.id, meta.bookId]);
 
   const toggleMeta = () => {
     setShowMeta(!showMeta);
@@ -690,6 +701,7 @@ function ChapterProps({ meta }: { meta: ChapterMeta }) {
                 checked={meta.status === s}
                 onClick={() => {
                   update('chapters', meta.id, { status: s }, true);
+                  if (s === 'done' && meta.status !== 'done') memorizeNow(meta.bookId, meta.id, false);
                   close();
                 }}
               >
@@ -700,7 +712,7 @@ function ChapterProps({ meta }: { meta: ChapterMeta }) {
         </Menu>
       </div>
       {rows.map((r) => (
-        <PropRow key={r.key} label={r.label} icon={r.icon}>
+        <PropRow key={r.key} label={r.key === 'summary' ? <SummaryLabel meta={meta} /> : r.label} icon={r.icon}>
           <PropText value={meta[r.key]} placeholder={r.placeholder} onChange={(v) => update('chapters', meta.id, { [r.key]: v })} />
         </PropRow>
       ))}
@@ -717,7 +729,25 @@ function PropLabel({ icon, children }: { icon: ReactNode; children: ReactNode })
   );
 }
 
-function PropRow({ label, icon, children }: { label: string; icon: ReactNode; children: ReactNode }) {
+/** 摘要过期或正在整理时，在「摘要」后面标出来 */
+function SummaryLabel({ meta }: { meta: ChapterMeta }) {
+  const busy = useMemory((s) => s.running?.id === meta.id || s.queue.some((j) => j.id === meta.id));
+  const stale = summaryState(meta) === 'stale';
+  return (
+    <span className="flex items-center gap-1">
+      摘要
+      {busy ? (
+        <Spinner className="size-3" />
+      ) : stale ? (
+        <span title="生成摘要后正文又改了不少，离开本章后会自动更新" className="rounded bg-amber-500/15 px-1 text-[10.5px] text-amber-700 dark:text-amber-300">
+          过期
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+function PropRow({ label, icon, children }: { label: ReactNode; icon: ReactNode; children: ReactNode }) {
   return (
     <>
       <PropLabel icon={icon}>{label}</PropLabel>

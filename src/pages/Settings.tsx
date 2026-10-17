@@ -47,6 +47,16 @@ export default function SettingsPage() {
                 onBlur={() => settings.maxTokens > 0 && settings.maxTokens < 256 && updateSettings({ maxTokens: 256 })}
               />
             </Field>
+            <label className="flex cursor-pointer items-start gap-2.5 sm:col-span-2">
+              <input type="checkbox" checked={settings.autoMemory} onChange={(e) => updateSettings({ autoMemory: e.target.checked })} className="mt-1" />
+              <span className="text-sm">
+                自动记忆
+                <span className="mt-0.5 block text-xs leading-relaxed text-muted">
+                  离开一章或把章节标为「完成」时，用默认模型自动生成本章摘要，并整理人物、设定、伏笔的变化等你确认；前面的分卷写完后自动生成卷回顾。写后面的章节时，这些会按模型容量带给
+                  AI，减少前后矛盾。每章大约多一次 AI 调用。
+                </span>
+              </span>
+            </label>
           </div>
         </Section>
         <AntiAiSection settings={settings} update={updateSettings} />

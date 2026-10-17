@@ -106,7 +106,9 @@ export const useBook = create<BookState>((set, get) => {
             tree: {
               ...tree,
               chapters: tree.chapters.map((c) =>
-                c.id === saved.id ? { ...c, wordCount: saved.wordCount as number, updatedAt: saved.updatedAt as number } : c,
+                c.id === saved.id
+                  ? { ...c, wordCount: saved.wordCount as number, summaryWords: saved.summaryWords as number, updatedAt: saved.updatedAt as number }
+                  : c,
               ),
             },
           });

@@ -1,10 +1,12 @@
-import { ChevronsUpDown, Flag, Globe, Info, ListTree, PenLine, Search, Settings, Users, X } from 'lucide-react';
+import { Brain, ChevronsUpDown, Flag, Globe, Info, ListTree, PenLine, Search, Settings, Users, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useLocation, useNavigate } from 'react-router';
 import { chapterLabels, formatWords } from '../../shared/text';
 import type { ChapterMeta, SearchHit } from '../../shared/types';
 import { api } from '../api';
-import { cx, Kbd } from '../components/ui';
+import { MemoryReview } from '../components/MemoryReview';
+import { cx, Kbd, Spinner } from '../components/ui';
+import { useMemory } from '../memory';
 import { toastError, useBook, useUi } from '../store';
 import { ChapterTree } from './write/ChapterTree';
 
@@ -20,7 +22,11 @@ export function Sidebar() {
 
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<SearchHit[] | null>(null);
+  const [review, setReview] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const memRunning = useMemory((s) => s.running);
+  const memWaiting = useMemory((s) => s.queue.length);
+  const memUpdates = useMemory((s) => s.updates.length);
 
   const labels = useMemo(() => {
     const ordered: ChapterMeta[] = [];
@@ -144,6 +150,33 @@ export function Sidebar() {
         </>
       )}
 
+      {(memRunning || memUpdates > 0) && (
+        <div className="space-y-0.5 px-2 pb-1">
+          {memRunning && (
+            <div className="flex h-7 items-center gap-2 px-2 text-[12px] text-muted" title="自动记忆：生成摘要、整理人物和设定的变化">
+              <Spinner className="size-3.5" />
+              <span className="min-w-0 flex-1 truncate">
+                正在整理记忆：
+                {memRunning.kind === 'chapter'
+                  ? (labels.get(memRunning.id) ?? '章节')
+                  : `${tree.volumes.find((v) => v.id === memRunning.id)?.title ?? '分卷'}回顾`}
+              </span>
+              {memWaiting > 0 && <span className="shrink-0">+{memWaiting}</span>}
+            </div>
+          )}
+          {memUpdates > 0 && (
+            <button
+              type="button"
+              onClick={() => setReview(true)}
+              className="flex h-7 w-full items-center gap-2 rounded-md px-2 text-[12.5px] font-medium text-ai transition hover:bg-ai-soft"
+            >
+              <Brain className="size-3.5" />
+              <span className="flex-1 text-left">{memUpdates} 条记忆待确认</span>
+            </button>
+          )}
+        </div>
+      )}
+      {review && <MemoryReview onClose={() => setReview(false)} />}
       <div className="flex items-center gap-2 border-t border-line px-4 py-2 text-[11.5px] text-muted">
         <span
           className={cx('size-1.5 shrink-0 rounded-full', saveError ? 'bg-danger' : saving ? 'animate-pulse bg-amber-500' : 'bg-ok')}

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Link, Outlet, useParams } from 'react-router';
 import { Button, Empty, Spinner } from '../components/ui';
+import { memoryOnBookOpen } from '../memory';
 import { useBook, useUi } from '../store';
 import { Sidebar } from './Sidebar';
 
@@ -21,6 +22,12 @@ export default function BookLayout() {
   }, [tree?.book.title]);
 
   useEffect(() => () => void useBook.getState().flush(), []);
+
+  // 打开作品后在后台补齐缺的记忆
+  const loadedId = tree && !loadingId && tree.book.id === bookId ? bookId : undefined;
+  useEffect(() => {
+    if (loadedId) memoryOnBookOpen(loadedId);
+  }, [loadedId]);
 
   if (error)
     return (
