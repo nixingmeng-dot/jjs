@@ -1,0 +1,30 @@
+name: Windows 免安装版
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build:exe
+      - name: 启动测试
+        run: node scripts/smoke-exe.mjs release/Inkwell.exe
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Inkwell-win-x64
+          path: release/Inkwell-win-x64.zip
+          compression-level: 0
